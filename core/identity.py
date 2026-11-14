@@ -6,7 +6,7 @@ from .compendial import get_local_smiles
 from .evidence import make_evidence
 
 
-def get_smiles_from_name(name: str | None) -> dict | None:
+def get_smiles_from_name(name: str | None, *, allow_external: bool = False) -> dict | None:
     if not name:
         return None
 
@@ -26,6 +26,9 @@ def get_smiles_from_name(name: str | None) -> dict | None:
             )
         ]
         return local
+
+    if not allow_external:
+        return None
 
     clean_url_name = urllib.parse.quote(name.strip())
 

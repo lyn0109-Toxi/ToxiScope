@@ -7,3 +7,6 @@ textColor = "#f1f5f9"
 
 [server]
 headless = true
+
+[browser]
+gatherUsageStats = false

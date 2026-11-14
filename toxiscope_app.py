@@ -144,7 +144,10 @@ if "be_profile" not in st.session_state:
 
 # --- UI Layout ---
 with st.sidebar:
-    st.markdown("<div class='accent-text'>Harness Active</div>", unsafe_allow_html=True)
+    workspace = st.radio("Workspace", ["Strategy Dashboard", "Toxicity Evidence Review"], key="workspace")
+    st.caption("NTR integration 2026.11.14")
+    if workspace == "Strategy Dashboard":
+        st.markdown("<div class='accent-text'>Harness Active</div>", unsafe_allow_html=True)
     st.title("Project Scope")
     project_id = st.text_input("Project ID", value="TXS-2026-001")
     analyst = st.text_input("Expert Analyst", value="Lee Young-nam")
@@ -181,6 +184,7 @@ def run_assessment(compound_name, smiles_value):
         project_id=project_id,
         analyst=analyst,
     )
+    st.session_state.assessment_compound_name = compound_name
     st.session_state.evidence_package = package
     st.session_state.results = package["assessment"]
     st.session_state.degradants = package["degradation_products"]
@@ -583,6 +587,17 @@ def render_bioequivalence_module():
                 """
             )
 
+if workspace == "Toxicity Evidence Review":
+    from ntr_panel import render_ntr_panel
+    name = st.text_input("Compound name / project label", value=st.session_state.get("assessment_compound_name", ""), key="ntr_compound_name")
+    st.caption("Select Strategy Dashboard to run structural screens. They remain separate from observed toxicity evidence.")
+    context_package = st.session_state.evidence_package or {}
+    if context_package and name != st.session_state.get("assessment_compound_name", ""):
+        st.warning("Compound label differs from the last structural assessment. Structural context is excluded.")
+        context_package = {}
+    render_ntr_panel(project_id, name, context_package)
+    st.stop()
+
 st.markdown("<div class='accent-text'>Regulatory Development Strategy Platform</div>", unsafe_allow_html=True)
 st.markdown("<h1 class='hero-title'>ToxiGuard-Platform</h1>", unsafe_allow_html=True)
 st.caption("Ontology + ToxiGuard-AI + ToxiScope + Bioequivalence strategy are connected through one project-level decision workflow.")
@@ -597,10 +612,12 @@ with col1:
     
     input_name = st.text_input("Compound Name", placeholder="e.g. Brivaracetam, Aniline...")
     
+    allow_external = st.checkbox("Allow this compound name to be sent to PubChem / NCI", value=False,
+        key="external_consent:" + input_name)
     if st.button("🔍 Search SMILES from Name", use_container_width=True):
         if input_name:
             with st.spinner(f"Resolving '{input_name}'..."):
-                res = get_smiles_from_name(input_name)
+                res = get_smiles_from_name(input_name, allow_external=allow_external)
                 if res:
                     st.session_state.smiles = res['smiles']
                     st.session_state.identity = res
@@ -608,7 +625,7 @@ with col1:
                     with st.spinner("Running regulatory assessment..."):
                         run_assessment(input_name, res["smiles"])
                 else:
-                    st.error("Name resolution failed. Please input SMILES manually.")
+                    st.error("No local match. Enter SMILES manually, or explicitly allow external lookup for this compound name.")
 
     input_smiles = st.text_area("SMILES String", key="smiles", height=110)
     if input_smiles:

@@ -32,3 +32,17 @@ streamlit run streamlit_app.py
 - `core/degradation.py`: predicted degradation product assessment
 - `core/harness.py`: validation gates and worker-report style manifest
 - `core/reporting.py`: regulatory narrative generation
+
+## NTR evidence workspace
+
+Select **Toxicity Evidence Review** in the sidebar. Upload permitted documents,
+classify their source, and review proposed assertions before evaluation. Structural
+screens are separate context, not observed toxicity facts. Processing occurs on
+the app server, with no external AI calls; this is not browser-local processing.
+Exports include document text, so treat them as confidential. Session state is
+not a persistent project store.
+
+This is a fixed-rule research prototype focused on early hepatotoxicity. Other
+endpoints are unevaluable (R0). R0–R5 are uncalibrated evidence-role labels, not
+safety predictions or regulatory acceptance. Name lookup is local by default;
+PubChem/NCI requests require query-specific opt-in.
