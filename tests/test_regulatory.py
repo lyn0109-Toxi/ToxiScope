@@ -70,23 +70,23 @@ class RegulatoryIntegrationTests(unittest.TestCase):
                 self.assertNotIn("ICH M7 Class", str(item["class"]))
                 self.assertTrue(item["evidence_objects"])
 
-    def test_be_python_fallback_and_strategy_integration_are_preserved(self):
-        # Retain the separately calculated BE output while correcting SAR labels.
-        with patch("core.bioequivalence._run_r_backend", return_value=None):
-            result = calculate_f2(DEFAULT_DISSOLUTION_PROFILE, bootstrap_runs=50, seed=1729)
+    def test_descriptive_f2_simulation_and_strategy_integration_are_preserved(self):
+        result = calculate_f2(DEFAULT_DISSOLUTION_PROFILE, bootstrap_runs=50, seed=1729, backend="python")
         expected_f2 = round(50 * math.log10(100 / math.sqrt(1 + 4)), 2)
         self.assertEqual(result.f2, expected_f2)
         self.assertFalse(result.r_backend_used)
-        self.assertEqual(result.bootstrap_runs, 50)
-        self.assertIsNotNone(result.ci_low)
-        self.assertIsNotNone(result.ci_high)
-        self.assertLessEqual(result.ci_low, result.ci_high)
-        self.assertIsNotNone(result.probability_f2_ge_50)
+        self.assertEqual(result.schema, "dissolution-f2-simulation.v2")
+        self.assertEqual(result.backend, "python")
+        self.assertEqual(result.simulation_runs, 50)
+        self.assertLessEqual(result.simulation_interval_low, result.simulation_interval_high)
+        self.assertIsNotNone(result.simulated_fraction_f2_ge_50)
+        self.assertFalse(result.clinical_be_established)
+        self.assertEqual(result.regulatory_acceptance, "Not established")
         assessment = assess_genotoxicity(ASPIRIN)
         snapshot = build_strategy_snapshot(assessment, [], result)
         workflow = build_submission_workflow(assessment, [], result)
         self.assertEqual(snapshot["toxicology_risk"], "Review needed")
-        self.assertTrue(snapshot["bioequivalence_risk"])
+        self.assertEqual(snapshot["bioequivalence_risk"], "Review needed")
         self.assertGreaterEqual(len(workflow), 5)
 
 

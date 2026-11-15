@@ -12,10 +12,10 @@ FDA_GUIDANCE_MAP = [
         "Decision use": "Map known and predicted impurities to control strategy and evidence needs.",
     },
     {
-        "Area": "Bioequivalence",
-        "Primary basis": "FDA/ICH M13A, FDA IR Dissolution Testing guidance",
-        "Platform module": "Bioequivalence Strategy",
-        "Decision use": "Compare reference/test dissolution profiles and support BE or biowaiver strategy.",
+        "Area": "Dissolution / Bioequivalence review",
+        "Primary basis": "Background references: FDA/ICH M13A and FDA IR dissolution guidance; these do not validate the app's output.",
+        "Platform module": "Dissolution Profile Comparison",
+        "Decision use": "Describe supplied dissolution profiles and simulation assumptions for qualified product-specific review. Clinical BE, biowaiver eligibility and regulatory acceptance are not established.",
     },
     {
         "Area": "Submission narrative",
@@ -59,13 +59,9 @@ def classify_toxicology_risk(results):
 
 
 def classify_be_risk(be_result):
-    if not be_result:
-        return "Not started", "Enter reference/test dissolution data and calculate f2."
-    if be_result.f2 >= 50 and be_result.cv_flag == "Acceptable":
-        return "Low", "FDA-style f2 similarity rationale is supported by current dissolution profile."
-    if be_result.f2 >= 50:
-        return "Medium", "f2 is acceptable, but variability needs justification."
-    return "High", "f2 is below 50. Review formulation/process or in vivo BE strategy."
+    if be_result is None:
+        return "Not started", "Enter reference/test dissolution data for descriptive f2 comparison and review the simulation assumptions."
+    return "Review needed", "Descriptive dissolution f2 and assumption-based parametric simulation do not establish clinical bioequivalence, biowaiver eligibility or regulatory acceptance. Qualified product-specific review is required."
 
 
 def classify_degradation_risk(degradants):
@@ -114,7 +110,7 @@ def build_strategy_snapshot(results=None, degradants=None, be_result=None, role=
         "module_actions": [
             {"Module": "Structural Alert Screening", "Risk": tox_risk, "Next action": tox_action},
             {"Module": "Impurity / Degradation", "Risk": deg_risk, "Next action": deg_action},
-            {"Module": "Bioequivalence", "Risk": be_risk, "Next action": be_action},
+            {"Module": "Dissolution Profile Comparison", "Risk": be_risk, "Next action": be_action},
             {"Module": "Regulatory Evidence", "Risk": "Review needed", "Next action": "Map FDA/ICH/USP sources to the selected submission pathway."},
         ],
     }
@@ -125,7 +121,7 @@ def build_submission_workflow(results=None, degradants=None, be_result=None):
         {"Step": "1. Product profile", "Status": "Ready", "Output": "Project, product, route, dosage form, and submission pathway defined."},
         {"Step": "2. Structural alert screening", "Status": "Review needed" if results else "Pending", "Output": "Limited rule-screen findings and evidence matrix for qualified ICH M7 review; no final class."},
         {"Step": "3. Degradation / impurity", "Status": "Ready" if degradants else "Pending", "Output": "Known/predicted degradants, structure map, source review queue."},
-        {"Step": "4. Bioequivalence", "Status": "Ready" if be_result else "Pending", "Output": "FDA f2/bootstrap result and BE strategy decision."},
+        {"Step": "4. Dissolution profile comparison", "Status": "Review needed" if be_result is not None else "Pending", "Output": "Descriptive f2, parametric simulation and assumptions for qualified product-specific review; clinical BE and regulatory acceptance are not established."},
         {"Step": "5. Source mapping", "Status": "In progress", "Output": "FDA/ICH/USP/EP/DMF evidence basis."},
         {"Step": "6. Submission narrative", "Status": "Draft", "Output": "Regulatory justification for internal review or agency package."},
     ]

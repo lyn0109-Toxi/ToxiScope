@@ -52,6 +52,59 @@ software regression checks, not scientific validation or regulatory acceptance.
 - `core/degradation.py`: predicted degradation product assessment
 - `core/harness.py`: software workflow checks and worker-report style manifest
 - `core/reporting.py`: draft narrative generation with screening limitations
+- `core/bioequivalence.py`: descriptive dissolution f2 comparison and parametric simulation; clinical BE and regulatory acceptance are not established
+
+## Dissolution profile comparison
+
+The BE workspace provides a descriptive f2 calculation and an assumption-based
+parametric simulation from supplied dissolution summary statistics. A high f2,
+low variation, or simulation percentile does not establish clinical
+bioequivalence, biowaiver eligibility, or regulatory acceptance. FDA/ICH links
+are background references; they do not validate this implementation or any
+product-specific use. The strategy dashboard keeps the result under review.
+
+Inputs must include the required time, reference/test mean percentage, SD, and
+sample-size columns with finite numeric values. Times must be unique and
+strictly positive; their ordering is normalized without removing points. Mean
+percentages must lie between 0 and 100, SDs must be nonnegative, and sample sizes
+must be integers of at least two, constant within each arm. Reference and test
+arms may have different sample sizes. Missing or invalid values are rejected
+rather than imputed or silently removed. Values above 100, including analytical
+recoveries, are outside this model's supported input range and are not clamped.
+The calculation requires at least three time points. Sample sizes below 12
+produce an applicability warning. These software checks do not establish that
+a study design meets product-specific regulatory requirements.
+
+The simulation draws each sample mean from a normal distribution with the
+entered mean and standard error SD/sqrt(n). It does not resample observed units
+and is not an empirical bootstrap. Reference/test arms and sampling times are
+assumed independent. Longitudinal within-unit correlations cannot be recovered
+from summary data, and simulated values are not clipped to 0–100. Percentiles
+describe this assumed simulation distribution; they are not calibrated
+confidence intervals, BE probabilities, or probabilities of regulatory success.
+
+Results use schema `dissolution-f2-simulation.v2` and retain assumptions,
+limitations, the fixed seed, backend, and software versions for review. A
+repeated calculation with the same inputs and backend is reproducible within
+the recorded software environment. Python and R use different random streams,
+so the same seed does not make their draws identical. Selecting R requires a
+successful R execution; an R failure is reported without silently switching to
+Python. Use the result's `to_dict()` method for export; it excludes legacy
+CI/bootstrap/probability/FDA attribute aliases. Clinical BE remains unestablished
+in exported results.
+
+The CV display uses a labeled legacy heuristic of 20% at the first retained
+point and 10% at later points. It is a variability flag, not a universal
+FDA/EMA acceptance policy. Review the applicable guidance and product-specific
+requirements separately. Background sources include the
+[FDA dissolution guidance](https://www.fda.gov/regulatory-information/search-fda-guidance-documents/dissolution-testing-immediate-release-solid-oral-dosage-forms)
+and the [EMA investigation of bioequivalence guideline, revision 1](https://www.ema.europa.eu/en/documents/scientific-guideline/guideline-investigation-bioequivalence-rev1_en.pdf).
+
+SD inputs are sample standard deviations in percentage points; they are not
+standard errors or CV values. The summary-normal simulation does not implement
+the individual-observation/Expected-f2 bootstrap discussed in the
+[EMA comparative-dissolution Q&A](https://www.ema.europa.eu/en/scientific-guidelines/clinical-pharmacology-pharmacokinetics-questions-answers)
+(sections 3.11 and 3.13 on the reviewed page). No EMA compliance claim is made.
 
 ## NTR evidence workspace
 

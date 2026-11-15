@@ -14,7 +14,7 @@ def test_ntr_navigation_evaluate_reset_and_return():
     next(b for b in app.button if b.label == 'Clear NTR workspace').click().run()
     assert not app.exception
     app.radio(key='workspace').set_value('Strategy Dashboard').run()
-    assert any(b.label == 'Calculate f2 with Bootstrap' for b in app.button)
+    assert any(b.label == 'Calculate f2 and simulation' for b in app.button)
     app.radio(key='workspace').set_value('Toxicity Evidence Review').run()
     assert not app.exception
     assert len(app.session_state['ntr_docs']) == 0
@@ -37,7 +37,7 @@ def test_existing_qsar_be_and_mismatched_context():
     next(b for b in app.button if b.label == '🚀 Run Regulatory Assessment').click().run()
     assert not app.exception
     assert app.session_state['evidence_package']['assessment']
-    next(b for b in app.button if b.label == 'Calculate f2 with Bootstrap').click().run()
+    next(b for b in app.button if b.label == 'Calculate f2 and simulation').click().run()
     assert not app.exception
     assert app.session_state['be_result'].f2 > 50
     app.radio(key='workspace').set_value('Toxicity Evidence Review').run()

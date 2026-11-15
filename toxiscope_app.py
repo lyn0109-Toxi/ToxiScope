@@ -6,6 +6,9 @@ import sys
 import os
 import urllib.parse
 import requests
+import hashlib
+import json
+import platform
 
 # Add the current directory to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -141,6 +144,13 @@ if "evidence_package" not in st.session_state:
     st.session_state.evidence_package = None
 if "be_profile" not in st.session_state:
     st.session_state.be_profile = DEFAULT_DISSOLUTION_PROFILE.copy()
+if st.session_state.get("be_result") is not None and (
+    getattr(st.session_state.be_result, "schema", None) != "dissolution-f2-simulation.v2"
+    or not st.session_state.get("be_request_fingerprint")
+):
+    st.session_state.be_result = None
+    st.session_state.be_export = None
+    st.session_state.be_invalidation_notice = True
 
 # An existing browser session may still hold output from the former fixed-score
 # implementation. Require a new screen before showing those derived packages.
@@ -189,7 +199,7 @@ with st.sidebar:
     st.checkbox("ICH M7(R2) reference context", value=True, disabled=True)
     st.checkbox("Limited SMARTS structural alert rules", value=True, disabled=True)
     st.checkbox("Proactive Degradation", value=True)
-    st.checkbox("Bioequivalence / f2 Strategy", value=True)
+    st.checkbox("Dissolution f2 comparison", value=True)
 
 def run_assessment(compound_name, smiles_value):
     package = build_harnessed_evidence_package(
@@ -475,16 +485,17 @@ def risk_badge_html(label, value):
     """
 
 def render_strategy_dashboard():
+    be_result = current_be_result()
     snapshot = build_strategy_snapshot(
         results=st.session_state.results,
         degradants=st.session_state.degradants,
-        be_result=st.session_state.get("be_result"),
+        be_result=be_result,
         role=user_role,
     )
     workflow = build_submission_workflow(
         results=st.session_state.results,
         degradants=st.session_state.degradants,
-        be_result=st.session_state.get("be_result"),
+        be_result=be_result,
     )
 
     st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
@@ -501,7 +512,7 @@ def render_strategy_dashboard():
     r1.markdown(risk_badge_html("Overall Regulatory Risk", snapshot["overall_risk"]), unsafe_allow_html=True)
     r2.markdown(risk_badge_html("Structural alert screening", snapshot["toxicology_risk"]), unsafe_allow_html=True)
     r3.markdown(risk_badge_html("Impurity / Degradation", snapshot["degradation_risk"]), unsafe_allow_html=True)
-    r4.markdown(risk_badge_html("Bioequivalence", snapshot["bioequivalence_risk"]), unsafe_allow_html=True)
+    r4.markdown(risk_badge_html("Dissolution comparison", snapshot["bioequivalence_risk"]), unsafe_allow_html=True)
 
     st.info(f"**{user_role} focus**: {snapshot['role_focus']}  \n\n**Recommended next action**: {snapshot['role_next_action']}")
 
@@ -513,94 +524,192 @@ def render_strategy_dashboard():
     with dash_tab3:
         st.dataframe(pd.DataFrame(FDA_GUIDANCE_MAP), use_container_width=True, hide_index=True)
 
+def _be_project_context():
+    return {
+        "project_id": project_id,
+        "reference_product": reference_product,
+        "dosage_form": dosage_form,
+        "submission_pathway": submission_path,
+        "development_stage": development_stage,
+        "analyst": analyst,
+        "daily_dose_mg": daily_dose_mg,
+        "compound_name": st.session_state.get("be_current_compound_name", st.session_state.get("assessment_compound_name", "")),
+        "smiles": st.session_state.smiles,
+    }
+
+
+def _be_fingerprint(profile, runs, seed, backend):
+    profile_data = {"columns": list(profile.columns), "rows": profile.to_dict("records")} if isinstance(profile, pd.DataFrame) else profile
+    payload = {"schema": "dissolution-f2-simulation.v2", "profile": profile_data,
+               "simulation_runs": runs, "seed": seed, "backend": backend,
+               "project_context": _be_project_context()}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def current_be_result():
+    """Expose only a result bound to the current profile, controls and context."""
+    result = st.session_state.get("be_result")
+    if result is None:
+        return None
+    fingerprint = _be_fingerprint(st.session_state.be_profile,
+        st.session_state.get("be_simulation_runs", 2000), st.session_state.get("be_seed", 1729),
+        str(st.session_state.get("be_backend", "Python")).lower())
+    if (getattr(result, "schema", None) != "dissolution-f2-simulation.v2"
+            or st.session_state.get("be_request_fingerprint") != fingerprint):
+        st.session_state.be_result = None
+        st.session_state.be_export = None
+        st.session_state.be_invalidation_notice = True
+        return None
+    return result
+
+
 def render_bioequivalence_module():
+    # The chemical-name input is rendered immediately before this module. Bind
+    # dissolution provenance to its current label even without a SAR rerun.
+    st.session_state.be_current_compound_name = input_name
     st.markdown("---")
-    st.markdown("<div class='accent-text'>Bioequivalence Strategy</div>", unsafe_allow_html=True)
-    st.markdown("## 의약품동등성 용출 비교")
-    st.caption("FDA BE guidance 맥락에서 Reference와 Test의 시간별 평균 용출률, 표준편차, n수를 입력하고 bootstrap 기반 f2 similarity factor를 계산합니다.")
+    st.markdown("<div class='accent-text'>Dissolution profile comparison</div>", unsafe_allow_html=True)
+    st.markdown("## Descriptive f2 and parametric simulation")
+    st.caption("The starting profile is an illustrative synthetic example, not product evidence. "
+               "Enter reference/test means, standard deviations and sample sizes from your own study.")
+    st.warning("This summary-data tool calculates descriptive f2 and an independent-normal parametric simulation. "
+               "It does not perform an empirical bootstrap or establish clinical bioequivalence, a biowaiver, or regulatory acceptance.")
 
     be_col1, be_col2 = st.columns([1.15, 0.85])
+    summary_df, profile_error = None, None
     with be_col1:
+        initial_profile = st.session_state.be_profile
+        if not isinstance(initial_profile, pd.DataFrame):
+            st.session_state.be_result = None
+            st.session_state.be_export = None
+            st.error("Profile validation failed: a table with the seven required dissolution columns is required.")
+            return
+        if initial_profile.columns.duplicated().any():
+            st.session_state.be_result = None
+            st.session_state.be_export = None
+            st.error("Profile validation failed: duplicate column names are not supported. Correct the source table before editing.")
+            return
+        column_config = {
+            "Time (min)": st.column_config.NumberColumn("Time (min)", min_value=0.0, step=5.0),
+            "Reference Mean (%)": st.column_config.NumberColumn("Reference Mean (%)", min_value=0.0, max_value=100.0, step=1.0),
+            "Reference SD": st.column_config.NumberColumn("Reference SD", min_value=0.0, step=0.1),
+            "Reference n": st.column_config.NumberColumn("Reference n", min_value=2, step=1),
+            "Test Mean (%)": st.column_config.NumberColumn("Test Mean (%)", min_value=0.0, max_value=100.0, step=1.0),
+            "Test SD": st.column_config.NumberColumn("Test SD", min_value=0.0, step=0.1),
+            "Test n": st.column_config.NumberColumn("Test n", min_value=2, step=1),
+        }
+        # A malformed imported/session table must remain correctable rather than
+        # fail while a numeric editor is being configured for text cells.
+        column_config = {column: config for column, config in column_config.items()
+                         if column in initial_profile and pd.api.types.is_numeric_dtype(initial_profile[column])}
+        editor_revision = hashlib.sha256(json.dumps(
+            initial_profile.to_dict("records") if isinstance(initial_profile, pd.DataFrame) else initial_profile,
+            sort_keys=True, default=str,
+        ).encode()).hexdigest()[:16]
         edited_profile = st.data_editor(
-            st.session_state.be_profile,
+            initial_profile,
             num_rows="dynamic",
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
-            column_config={
-                "Time (min)": st.column_config.NumberColumn("Time (min)", min_value=0.0, step=5.0),
-                "Reference Mean (%)": st.column_config.NumberColumn("Reference Mean (%)", min_value=0.0, max_value=150.0, step=1.0),
-                "Reference SD": st.column_config.NumberColumn("Reference SD", min_value=0.0, step=0.1),
-                "Reference n": st.column_config.NumberColumn("Reference n", min_value=1, step=1),
-                "Test Mean (%)": st.column_config.NumberColumn("Test Mean (%)", min_value=0.0, max_value=150.0, step=1.0),
-                "Test SD": st.column_config.NumberColumn("Test SD", min_value=0.0, step=0.1),
-                "Test n": st.column_config.NumberColumn("Test n", min_value=1, step=1),
-            },
-            key="be_profile_editor",
+            alt="Dissolution means, standard deviations and sample sizes at each sampling time",
+            column_config=column_config,
+            key="be_profile_editor:" + editor_revision,
         )
         st.session_state.be_profile = edited_profile
-
-        chart_df = dissolution_profile_summary(edited_profile)
-        if not chart_df.empty:
-            plot_df = chart_df.set_index("Time (min)")[["Reference Mean (%)", "Test Mean (%)"]]
-            st.line_chart(plot_df, use_container_width=True)
+        try:
+            summary_df = dissolution_profile_summary(edited_profile)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            profile_error = str(exc)
+            st.error("Profile validation failed: " + profile_error)
+            st.caption("Correct the supplied cells. Invalid rows and missing variability values are not dropped or replaced.")
+        if summary_df is not None and not summary_df.empty:
+            plot_df = summary_df.set_index("Time (min)")[["Reference Mean (%)", "Test Mean (%)"]]
+            st.line_chart(plot_df, width="stretch", alt="Reference and test mean dissolution profiles at all supplied valid time points")
+            st.caption("All supplied valid time points are retained. Time-point selection and dissolution method conditions require expert review.")
 
     with be_col2:
-        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-        st.markdown("#### Decision Snapshot")
-        bootstrap_runs = st.slider("Bootstrap iterations", min_value=500, max_value=10000, value=2000, step=500)
-        if st.button("Calculate f2 with Bootstrap", use_container_width=True):
+        st.markdown("#### Calculation controls")
+        simulation_runs = st.number_input("Simulation runs", min_value=1, max_value=100000,
+                                          value=2000, step=500, key="be_simulation_runs")
+        seed = st.number_input("Simulation seed", min_value=0, max_value=2147483647,
+                               value=1729, step=1, key="be_seed")
+        backend_label = st.selectbox("Simulation backend", ["Python", "R"], key="be_backend")
+        backend = backend_label.lower()
+        st.caption("The selected backend is explicit. R requires Rscript; an R failure does not switch to Python.")
+        fingerprint = _be_fingerprint(edited_profile, simulation_runs, seed, backend)
+        result = current_be_result()
+        if profile_error and result is not None:
+            st.session_state.be_result = None
+            st.session_state.be_export = None
+            result = None
+        if st.session_state.pop("be_invalidation_notice", False):
+            st.info("Previous dissolution output was cleared because the calculation inputs, schema or project context changed.")
+        if st.button("Calculate f2 and simulation", width="stretch", disabled=profile_error is not None):
+            st.session_state.be_result = None
+            st.session_state.be_export = None
+            st.session_state.be_calculation_error = None
             try:
-                be_result = calculate_f2(edited_profile, bootstrap_runs=bootstrap_runs)
-                st.session_state.be_result = be_result
-            except Exception as exc:
-                st.session_state.be_result = None
-                st.error(f"f2 calculation failed: {exc}")
-
-        be_result = st.session_state.get("be_result")
-        if be_result:
-            st.metric("f2 Similarity Factor", be_result.f2)
-            st.metric("Bootstrap 95% CI", f"{be_result.ci_low} - {be_result.ci_high}")
-            st.metric("Bootstrap P(f2 ≥ 50)", f"{be_result.probability_f2_ge_50}%")
-            st.write(f"**FDA strategy decision**: {be_result.fda_decision}")
-            st.write(f"**FDA submission risk**: {be_result.fda_risk}")
-            if be_result.f2 >= 50:
-                st.success("Reference와 Test의 평균 용출패턴은 FDA dissolution profile comparison의 f2 기준상 유사성 근거로 사용할 수 있습니다.")
-            else:
-                st.error("f2가 50 미만입니다. FDA 제출전략상 비교용출만으로 유사성 주장을 하기 어렵고, 처방/공정/입도/결정형/용출법 또는 in vivo BE 전략 검토가 필요합니다.")
-            st.info(be_result.fda_next_action)
-            if be_result.cv_flag == "Acceptable":
-                st.success("Time-point variability is within the screening threshold.")
-            else:
-                st.warning(f"Variability review: {be_result.cv_flag}")
-            backend = "R backend" if be_result.r_backend_used else "Python fallback"
-            st.caption(f"{backend}: {be_result.method_note}")
-            with st.expander("Bootstrap distribution detail"):
-                st.write(f"**Iterations**: {be_result.bootstrap_runs}")
-                st.write(f"**Median f2**: {be_result.bootstrap_median}")
-                st.write(f"**5th-95th percentile**: {be_result.bootstrap_p05} - {be_result.bootstrap_p95}")
-                st.write(f"**2.5th-97.5th percentile**: {be_result.ci_low} - {be_result.ci_high}")
-                st.info("Bootstrap은 각 time point의 평균, 표준편차, n수를 이용해 reference/test 용출률을 반복 재표본화하고, 반복마다 f2를 다시 계산하는 방식입니다.")
+                result = calculate_f2(edited_profile, simulation_runs=int(simulation_runs), seed=int(seed), backend=backend)
+                st.session_state.be_result = result
+                st.session_state.be_request_fingerprint = fingerprint
+            except (ValueError, TypeError, RuntimeError, OSError) as exc:
+                result = None
+                st.session_state.be_calculation_error = {"fingerprint": fingerprint, "message": str(exc)}
+        calculation_error = st.session_state.get("be_calculation_error")
+        if calculation_error and calculation_error.get("fingerprint") == fingerprint:
+            st.error("Dissolution calculation blocked: " + calculation_error["message"])
+        if result is not None:
+            st.metric("Descriptive f2", result.f2)
+            st.metric("Simulated f2, 2.5–97.5 percentiles",
+                      f"{result.simulation_interval_low:.2f} – {result.simulation_interval_high:.2f}")
+            st.metric("Simulated fraction with f2 ≥ 50", f"{result.simulated_fraction_f2_ge_50:.1%}")
+            st.caption("The displayed fraction is conditional on the simulation assumptions. "
+                       "The interval is a simulated percentile interval, not a confidence interval or a probability of bioequivalence.")
+            st.info(f"Descriptive threshold comparison: f2 {'≥' if result.descriptive_threshold_met else '<'} 50 for the supplied mean profiles.")
+            st.caption(f"Displayed f2 is rounded. The threshold comparison uses unrounded f2 = {result.f2_unrounded:.12g}.")
+            st.warning("Applicability: review needed. Clinical bioequivalence and regulatory acceptance are not established.")
+            for issue in result.applicability_issues:
+                st.warning(issue)
+            st.caption(f"Backend: {result.backend} {result.backend_version} · Seed: {result.seed} · Simulation runs: {result.simulation_runs}")
+            st.caption(result.method_note)
+            with st.expander("Simulation assumptions and limitations", expanded=True):
+                for assumption in result.simulation_assumptions:
+                    st.write(assumption)
+                for limitation in result.limitations:
+                    st.caption(limitation)
+                st.write(f"**Variability review policy**: {result.variability_policy}")
+            payload = result.to_dict()
+            export = {
+                "schema": "toxiscope-dissolution-review.v2",
+                "method": "Descriptive f2 and independent-normal parametric simulation",
+                "project_context": _be_project_context(),
+                "profile_columns": list(edited_profile.columns),
+                "profile": edited_profile.to_dict("records"),
+                "calculation_inputs": {"simulation_runs": int(simulation_runs), "seed": int(seed), "backend": backend},
+                "calculation_fingerprint": fingerprint,
+                "versions": {"python": platform.python_version(), "numpy": np.__version__,
+                             "pandas": pd.__version__, "backend": result.backend, "backend_version": result.backend_version},
+                "result": payload,
+                "simulation_assumptions": result.simulation_assumptions,
+                "limitations": result.limitations,
+                "clinical_be_established": False,
+                "regulatory_acceptance": "Not established",
+            }
+            st.session_state.be_export = export
+            st.download_button("Download dissolution calculation + provenance",
+                json.dumps(export, ensure_ascii=False, indent=2, default=str),
+                "toxiscope-dissolution-review.json", "application/json", key="be_download:" + fingerprint)
         else:
-            st.info("표를 입력한 뒤 f2 계산을 실행하세요.")
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.info("Validate the profile and calculate descriptive f2 with the selected simulation settings.")
 
-    st.markdown("#### FDA Bioequivalence Guidance Basis")
-    st.dataframe(pd.DataFrame(FDA_BE_GUIDANCE_SOURCES), use_container_width=True, hide_index=True)
-    st.caption("Primary basis: FDA/ICH M13A for immediate-release oral solid dosage forms, FDA IR dissolution testing guidance, and FDA Dissolution Methods Database for product-specific dissolution methods.")
-
-    summary_df = dissolution_profile_summary(st.session_state.be_profile)
-    if not summary_df.empty:
-        with st.expander("Detailed dissolution statistics"):
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
-            st.markdown(
-                """
-                **FDA-oriented regulatory interpretation**
-                - f2 >= 50: FDA dissolution profile comparison에서 reference와 test의 유사성 근거로 사용할 수 있습니다.
-                - f2 < 50: 비교용출만으로 동등성 주장을 하기 어렵고, 제품별 FDA 권장 용출법/USP 방법과 in vivo BE 필요성을 재검토해야 합니다.
-                - 초기 time point 변동성은 20%, 이후 time point 변동성은 10%를 넘으면 편차 근거를 별도로 설명하는 것이 좋습니다.
-                - 최종 제출 판단은 제품별 FDA guidance, product-specific guidance, USP method, RLD 특성, dosage form, BCS, formulation proportionality와 함께 검토해야 합니다.
-                """
-            )
+    if summary_df is not None and not summary_df.empty:
+        with st.expander("Supplied dissolution summary statistics"):
+            st.dataframe(summary_df, width="stretch", hide_index=True,
+                         alt="Descriptive dissolution statistics for the supplied profile")
+    with st.expander("Background guidance and method sources"):
+        st.dataframe(pd.DataFrame(FDA_BE_GUIDANCE_SOURCES), width="stretch", hide_index=True,
+                     alt="Background sources for expert review of dissolution method and study context")
+        st.caption("These links provide background for expert review. Listing them does not establish that this calculation complies with a guidance or that a product is bioequivalent.")
 
 if workspace == "Toxicity Evidence Review":
     from ntr_panel import render_ntr_panel

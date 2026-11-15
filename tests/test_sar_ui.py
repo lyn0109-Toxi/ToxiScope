@@ -65,16 +65,15 @@ def test_invalid_smiles_ui_reports_error_without_crashing():
 
 
 def test_legacy_cached_screen_is_cleared_without_clearing_other_workspaces():
-    from core.bioequivalence import DEFAULT_DISSOLUTION_PROFILE, calculate_f2
-
-    app = AppTest.from_file(APP)
+    app = AppTest.from_file(APP).run(timeout=30)
+    next(b for b in app.button if b.label == "Calculate f2 and simulation").click().run(timeout=30)
+    assert not app.exception
+    be_result = app.session_state["be_result"]
     app.session_state["results"] = {"status": "safe", "class": "ICH M7 Class 5"}
     app.session_state["evidence_package"] = {"assessment": {"old_probability": 0.82}}
     app.session_state["degradants"] = [{"status": "safe"}]
     app.session_state["known_impurities"] = [{"class": 5}]
     app.session_state["ntr_docs"] = ["Existing NTR document state"]
-    be_result = calculate_f2(DEFAULT_DISSOLUTION_PROFILE, bootstrap_runs=20)
-    app.session_state["be_result"] = be_result
     app.run(timeout=30)
     assert not app.exception
     assert app.session_state["results"] is None
@@ -83,9 +82,9 @@ def test_legacy_cached_screen_is_cleared_without_clearing_other_workspaces():
     assert app.session_state["known_impurities"] == []
     assert app.session_state["ntr_docs"] == ["Existing NTR document state"]
     assert app.session_state["be_result"].f2 == be_result.f2
-    assert any(m.label == "f2 Similarity Factor" and float(m.value) == be_result.f2 for m in app.metric)
+    assert any(m.label == "Descriptive f2" and float(m.value) == be_result.f2 for m in app.metric)
     assert any("Previous structural assessment output was cleared" in item.value for item in app.info)
-    assert any(b.label == "Calculate f2 with Bootstrap" for b in app.button)
+    assert any(b.label == "Calculate f2 and simulation" for b in app.button)
 
 
 def test_orphaned_legacy_package_is_cleared_before_ntr_context_export():
