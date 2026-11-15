@@ -16,6 +16,10 @@ from openpyxl import load_workbook
 from pypdf import PdfReader
 
 
+EVIDENCE_KIND_OPTIONS = ("unspecified", "observation", "prediction", "context")
+SCOPE_KEYS = ("subject", "endpoint", "system", "exposure", "timepoint", "study_id")
+
+
 @dataclass
 class SourceSegment:
     segment_id: str
@@ -85,6 +89,10 @@ class EvidenceAssertion:
     confidence: float
     review_status: str = "제안됨"
     reviewer_note: str = ""
+    evidence_kind: str = "unspecified"
+    scope: dict[str, str] = field(default_factory=dict)
+    extracted_value: str = ""
+    source_segment_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -105,6 +113,10 @@ class EvidenceAssertion:
             confidence=float(payload.get("confidence", 0.0) or 0.0),
             review_status=str(payload.get("review_status", "제안됨")),
             reviewer_note=str(payload.get("reviewer_note", "")),
+            evidence_kind=str(payload.get("evidence_kind", "unspecified")),
+            scope=dict(payload.get("scope", {})) if isinstance(payload.get("scope", {}), dict) else payload.get("scope"),
+            extracted_value=str(payload.get("extracted_value", "")),
+            source_segment_id=str(payload.get("source_segment_id", "")),
         )
 
 

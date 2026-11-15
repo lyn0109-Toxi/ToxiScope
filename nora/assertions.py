@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 import uuid
 from dataclasses import fields, is_dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, get_args, get_origin, get_type_hints
 
-from .evidence import DocumentRecord, EvidenceAssertion, SourceSegment
+from .evidence import EVIDENCE_KIND_OPTIONS, SCOPE_KEYS, DocumentRecord, EvidenceAssertion, SourceSegment
 from .models import AssessmentInput
 
 
@@ -41,14 +42,29 @@ def _add(
     value_type: str = "str",
     confidence: float = 0.75,
     match_span: tuple[int, int] | None = None,
+    evidence_kind: str | None = None,
+    scope: dict[str, str] | None = None,
 ) -> None:
     value = _clean_value(proposed_value)
     if not value:
         return
-    key = (field_path, value.lower(), document.document_id)
-    if any((item.field_path, item.proposed_value.lower(), item.source_document_id) == key for item in assertions):
-        return
     start, end = match_span or (0, min(len(segment.text), 320))
+    excerpt = _excerpt(segment.text, start, end)
+    scope = dict(scope or {})
+    kind = evidence_kind or (
+        "prediction" if field_path.startswith("ai_model.")
+        else "context" if field_path.startswith(("product.", "context_of_use."))
+        else "unspecified"
+    )
+    # Retain explicit scalar repetitions so same-document contradictions remain
+    # visible. Merge only identical list candidates from the same cited location.
+    key = (field_path, value.lower(), document.document_id, segment.segment_id, segment.location, excerpt, kind, tuple(sorted(scope.items())))
+    if value_type == "list" and any(
+        (item.field_path, item.proposed_value.lower(), item.source_document_id, item.source_segment_id,
+         item.source_location, item.source_excerpt, item.evidence_kind,
+         tuple(sorted(item.scope.items()))) == key for item in assertions
+    ):
+        return
     assertions.append(
         EvidenceAssertion(
             assertion_id=_new_id(),
@@ -60,8 +76,12 @@ def _add(
             source_document_id=document.document_id,
             source_document_name=document.name,
             source_location=segment.location,
-            source_excerpt=_excerpt(segment.text, start, end),
+            source_excerpt=excerpt,
             confidence=round(max(0.0, min(1.0, confidence)), 2),
+            evidence_kind=kind,
+            scope=scope,
+            extracted_value=value,
+            source_segment_id=segment.segment_id,
         )
     )
 
@@ -80,24 +100,18 @@ def _first_regex(
     flags: int = re.IGNORECASE,
     transform: Any = None,
 ) -> None:
-    match = re.search(pattern, segment.text, flags=flags)
-    if not match:
-        return
-    value = match.group(1) if match.lastindex else match.group(0)
-    if transform:
-        value = transform(value)
-    _add(
-        assertions,
-        document,
-        segment,
-        category=category,
-        field_path=field_path,
-        label_ko=label_ko,
-        proposed_value=str(value),
-        value_type=value_type,
-        confidence=confidence,
-        match_span=(match.start(), match.end()),
-    )
+    # Keep the historical helper name for callers, but retain every explicit
+    # value rather than silently hiding later study values in the same segment.
+    for match in re.finditer(pattern, segment.text, flags=flags):
+        value = match.group(1) if match.lastindex else match.group(0)
+        if transform:
+            value = transform(value)
+        _add(
+            assertions, document, segment,
+            category=category, field_path=field_path, label_ko=label_ko,
+            proposed_value=str(value), value_type=value_type,
+            confidence=confidence, match_span=(match.start(), match.end()),
+        )
 
 
 
@@ -140,8 +154,7 @@ def _keyword_assertion(
     allow_negated: bool = False,
 ) -> None:
     for pattern in patterns:
-        match = re.search(pattern, segment.text, flags=re.IGNORECASE)
-        if match:
+        for match in re.finditer(pattern, segment.text, flags=re.IGNORECASE):
             if not allow_negated and _is_negated(segment.text, match.start(), match.end()):
                 continue
             _add(
@@ -156,7 +169,50 @@ def _keyword_assertion(
                 confidence=confidence,
                 match_span=(match.start(), match.end()),
             )
-            return
+
+
+def _result_assertions(assertions: list[EvidenceAssertion], document: DocumentRecord, segment: SourceSegment) -> None:
+    """Propose explicitly attributed results; leave ambiguous source text for review."""
+    role_pattern = re.compile(r"\bAI\b|\bmodel\b|모델|\bNAM\b|\bassay\b|시험", re.IGNORECASE)
+    prediction_pattern = re.compile(r"\b(?:prediction|predicted)\b|예측", re.IGNORECASE)
+    output_pattern = re.compile(r"\b(?:prediction|predicted|result)\b|예측|결과", re.IGNORECASE)
+    outcome_pattern = re.compile(
+        r"(?P<negative>\bnegative\b|음성|\blow\s+risk\b|낮은\s*위험)"
+        r"|(?P<positive>\bpositive\b|양성|\bhigh\s+risk\b|높은\s*위험)", re.IGNORECASE,
+    )
+    for clause in re.finditer(r"[^\n;.!?]+", segment.text):
+        text = clause.group()
+        outcomes = list(outcome_pattern.finditer(text))
+        for index, outcome in enumerate(outcomes):
+            if re.match(r"\s*(?:control|대조)", text[outcome.end():], re.IGNORECASE):
+                continue
+            preceding = text[:outcome.start()]
+            roles = list(role_pattern.finditer(preceding))
+            if roles:
+                context = roles[-1]
+                role = "nam" if re.fullmatch(r"NAM|assay|시험", context.group(), re.IGNORECASE) else "ai"
+                relevant = preceding[context.start():]
+            elif prediction_pattern.search(preceding):
+                role, relevant = "ai", preceding
+            else:
+                continue
+            if not output_pattern.search(relevant) or re.search(r"\bcontrol\b|대조", relevant, re.IGNORECASE):
+                continue
+            preceding_result_end = outcomes[index - 1].end() if index else 0
+            if role == "nam" and prediction_pattern.search(preceding[preceding_result_end:]):
+                continue
+            if _is_negated(segment.text, clause.start(), clause.start() + outcome.end()):
+                continue
+            negative = outcome.group("negative") is not None
+            _add(
+                assertions, document, segment,
+                category="AI 모델" if role == "ai" else "NAM 시험",
+                field_path="ai_model.result" if role == "ai" else "nam_assay.result",
+                label_ko="AI 예측 결과" if role == "ai" else "NAM 결과",
+                proposed_value=("음성 / 낮은 위험 예측" if negative else "양성 / 위험 신호") if role == "ai" else ("음성" if negative else "양성"),
+                confidence=0.80 if role == "ai" else 0.78,
+                match_span=(clause.start(), clause.start() + outcome.end()),
+            )
 
 
 def extract_assertions(document: DocumentRecord) -> list[EvidenceAssertion]:
@@ -216,11 +272,11 @@ def extract_assertions(document: DocumentRecord) -> list[EvidenceAssertion]:
         _keyword_assertion(assertions, document, segment, patterns=[r"external\s+validation[^\n]{0,80}(?:completed|confirmed|independent|validated)|외부\s*(?:독립\s*)?검증[^\n]{0,80}(?:완료|확인|독립|검증됨)"], category="AI 모델", field_path="ai_model.external_validation", label_ko="외부 독립검증", proposed_value="확인됨", confidence=0.82)
         _keyword_assertion(assertions, document, segment, patterns=[r"calibrat(?:ed|ion).*valid|확률\s*보정.*검증"], category="AI 모델", field_path="ai_model.calibration_status", label_ko="Calibration", proposed_value="검증됨", confidence=0.76)
         _keyword_assertion(assertions, document, segment, patterns=[r"hepatotoxicity|drug[- ]?induced\s+liver\s+injury|\bDILI\b|간독성|약물유발\s*간손상"], category="AI 모델", field_path="ai_model.endpoint", label_ko="AI 예측 Endpoint", proposed_value="초기 간독성", confidence=0.78)
-        _keyword_assertion(assertions, document, segment, patterns=[r"(?:prediction|예측|result|결과)[^\n]{0,70}(?:negative|음성|low\s+risk|낮은\s*위험)"], category="AI 모델", field_path="ai_model.result", label_ko="AI 예측 결과", proposed_value="음성 / 낮은 위험 예측", confidence=0.80)
-        _keyword_assertion(assertions, document, segment, patterns=[r"(?:prediction|예측|result|결과)[^\n]{0,70}(?:positive|양성|high\s+risk|높은\s*위험)"], category="AI 모델", field_path="ai_model.result", label_ko="AI 예측 결과", proposed_value="양성 / 위험 신호", confidence=0.80)
         _keyword_assertion(assertions, document, segment, patterns=[r"training[^\n]{0,90}small[- ]?molecule|학습[^\n]{0,90}저분자"], category="AI 모델", field_path="ai_model.domain_modalities", label_ko="AI 학습 Modality", proposed_value="저분자", value_type="list", confidence=0.78)
         _keyword_assertion(assertions, document, segment, patterns=[r"training[^\n]{0,90}oligonucleotide|학습[^\n]{0,90}올리고"], category="AI 모델", field_path="ai_model.domain_modalities", label_ko="AI 학습 Modality", proposed_value="올리고뉴클레오타이드", value_type="list", confidence=0.78)
         _keyword_assertion(assertions, document, segment, patterns=[r"training[^\n]{0,90}nano|학습[^\n]{0,90}나노"], category="AI 모델", field_path="ai_model.domain_modalities", label_ko="AI 학습 Modality", proposed_value="나노의약품", value_type="list", confidence=0.78)
+
+        _result_assertions(assertions, document, segment)
 
         # NAM card
         _keyword_assertion(assertions, document, segment, patterns=[r"2D\s*(?:cell|culture)|2차원\s*세포"], category="NAM 시험", field_path="nam_assay.nam_type", label_ko="NAM 유형", proposed_value="2D 세포시험")
@@ -232,8 +288,6 @@ def extract_assertions(document: DocumentRecord) -> list[EvidenceAssertion]:
         _keyword_assertion(assertions, document, segment, patterns=[r"hepatocyte|간세포"], category="NAM 시험", field_path="nam_assay.cell_types", label_ko="포함 세포", proposed_value="간세포(Hepatocyte)", value_type="list")
         _keyword_assertion(assertions, document, segment, patterns=[r"Kupffer"], category="NAM 시험", field_path="nam_assay.cell_types", label_ko="포함 세포", proposed_value="Kupffer cell", value_type="list")
         _keyword_assertion(assertions, document, segment, patterns=[r"stellate"], category="NAM 시험", field_path="nam_assay.cell_types", label_ko="포함 세포", proposed_value="Stellate cell", value_type="list")
-        _keyword_assertion(assertions, document, segment, patterns=[r"(?:NAM|assay|시험)[^\n]{0,80}(?:negative|음성)"], category="NAM 시험", field_path="nam_assay.result", label_ko="NAM 결과", proposed_value="음성", confidence=0.78)
-        _keyword_assertion(assertions, document, segment, patterns=[r"(?:NAM|assay|시험)[^\n]{0,80}(?:positive|양성)"], category="NAM 시험", field_path="nam_assay.result", label_ko="NAM 결과", proposed_value="양성", confidence=0.78)
         _keyword_assertion(assertions, document, segment, patterns=[r"positive\s+control[^\n]{0,80}(?:valid|pass)|양성대조군[^\n]{0,80}(?:유효|통과)"], category="NAM 시험", field_path="nam_assay.positive_control", label_ko="양성대조군", proposed_value="유효")
         _keyword_assertion(assertions, document, segment, patterns=[r"negative\s+control[^\n]{0,80}(?:valid|pass)|음성대조군[^\n]{0,80}(?:유효|통과)"], category="NAM 시험", field_path="nam_assay.negative_control", label_ko="음성대조군", proposed_value="유효")
         _keyword_assertion(assertions, document, segment, patterns=[r"carrier[- ]?only\s+control[^\n]{0,60}(?:included|yes)|전달체\s*단독대조군[^\n]{0,60}(?:포함|있음)"], category="NAM 시험", field_path="nam_assay.carrier_only_control", label_ko="Carrier-only 대조군", proposed_value="포함")
@@ -265,43 +319,128 @@ def extract_assertions_from_documents(documents: Iterable[DocumentRecord]) -> li
     return assertions
 
 
+class AssertionValidationError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def metadata_issues(assertion: EvidenceAssertion) -> list[str]:
+    """Validate reviewer metadata without inferring its scientific correctness."""
+    issues = []
+    if assertion.evidence_kind not in EVIDENCE_KIND_OPTIONS:
+        issues.append("evidence_kind_invalid")
+    if not isinstance(assertion.scope, dict):
+        issues.append("scope_invalid")
+    else:
+        if any(key not in SCOPE_KEYS for key in assertion.scope):
+            issues.append("scope_key_unsupported")
+        if any(not isinstance(value, str) for value in assertion.scope.values()):
+            issues.append("scope_value_invalid")
+    return issues
+
+
+def _target(root: AssessmentInput, path: str) -> tuple[Any, str, str]:
+    if not isinstance(path, str):
+        raise AssertionValidationError("field_path_invalid", "Field path must be a string")
+    parts = path.split(".")
+    root_fields = {item.name for item in fields(root)}
+    if len(parts) != 2 or parts[0] not in root_fields:
+        raise AssertionValidationError("field_path_invalid", f"Unsupported field path: {path}")
+    parent_name, attribute = parts
+    parent = getattr(root, parent_name)
+    if not is_dataclass(parent) or attribute not in {item.name for item in fields(parent)}:
+        raise AssertionValidationError("field_path_invalid", f"Unknown target attribute: {path}")
+    annotation = get_type_hints(type(parent))[attribute]
+    alternatives = get_args(annotation)
+    if type(None) in alternatives:
+        non_null = [item for item in alternatives if item is not type(None)]
+        annotation = non_null[0] if len(non_null) == 1 else annotation
+    if annotation in (str, bool, int, float):
+        expected = annotation.__name__
+    elif get_origin(annotation) is list and get_args(annotation) == (str,):
+        expected = "list"
+    else:
+        raise AssertionValidationError("target_type_unsupported", f"Unsupported target type: {path}")
+    return parent, attribute, expected
+
+
 def _coerce(value: str, value_type: str) -> Any:
-    value = (value or "").strip()
+    value = str(value).strip()
+    if not value:
+        raise AssertionValidationError("value_invalid", "Reviewed assertion value must not be empty")
     if value_type == "bool":
-        return value.lower() in {"true", "1", "yes", "y", "예", "있음", "확인"}
-    if value_type == "float":
-        try:
-            return float(value.replace("%", "").strip())
-        except ValueError:
-            return None
+        normalized = value.casefold()
+        if normalized in {"true", "1", "yes", "y", "예", "있음", "확인"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "아니오", "없음"}:
+            return False
+        raise AssertionValidationError("value_invalid", f"Invalid boolean value: {value}")
     if value_type == "int":
+        if not re.fullmatch(r"[+-]?\d+(?:\.0+)?", value):
+            raise AssertionValidationError("value_invalid", f"Invalid integer value: {value}")
+        return int(value.split(".", 1)[0])
+    if value_type == "float":
+        numeric = value.removesuffix("%").strip()
         try:
-            return int(float(value))
-        except ValueError:
-            return None
+            number = float(numeric)
+        except (ValueError, OverflowError) as exc:
+            raise AssertionValidationError("value_invalid", f"Invalid {value_type} value: {value}") from exc
+        if not math.isfinite(number):
+            raise AssertionValidationError("value_invalid", f"Invalid finite {value_type} value: {value}")
+        return number
     if value_type == "list":
-        return [item.strip() for item in re.split(r"[,;|]", value) if item.strip()]
+        result = [item.strip() for item in re.split(r"[,;|]", value) if item.strip()]
+        if not result:
+            raise AssertionValidationError("value_invalid", "Reviewed list value must not be empty")
+        return result
+    if value_type == "str":
+        return value
+    raise AssertionValidationError("value_type_invalid", f"Unsupported assertion value type: {value_type}")
+
+
+def validate_numeric_domain(field_path: str, value: Any) -> None:
+    """Check basic numeric domains, not model performance or scientific validity."""
+    if type(value) not in {int, float}:
+        return
+    key = field_path.rsplit(".", 1)[-1]
+    bounds = (0, 100) if key.endswith("_percent") else (0, 1) if key in {
+        "auroc", "auprc", "decision_threshold", "brier_score"
+    } else (1, 5) if key in {"model_influence", "decision_consequence"} else None
+    if bounds and not bounds[0] <= value <= bounds[1]:
+        raise AssertionValidationError("value_out_of_range", f"Value outside {bounds[0]}–{bounds[1]}: {field_path}")
+    if key == "training_sample_size" and value < 0:
+        raise AssertionValidationError("value_out_of_range", f"Negative sample size: {field_path}")
+
+
+def validate_assertion_value(assertion: EvidenceAssertion, inp: AssessmentInput | None = None) -> Any:
+    """Return the typed value or raise; never silently skip a reviewed claim."""
+    _, _, expected = _target(inp if inp is not None else AssessmentInput(), assertion.field_path)
+    if assertion.value_type != expected:
+        raise AssertionValidationError(
+            "value_type_mismatch",
+            f"Value type for {assertion.field_path} must be {expected}, got {assertion.value_type}",
+        )
+    if not isinstance(assertion.proposed_value, str):
+        raise AssertionValidationError("value_invalid", "Reviewed assertion value must be a string for typed conversion")
+    value = _coerce(assertion.proposed_value, assertion.value_type)
+    validate_numeric_domain(assertion.field_path, value)
     return value
 
 
-def _set_path(root: Any, path: str, value: Any, value_type: str) -> None:
-    parts = path.split(".")
-    if len(parts) != 2:
-        raise ValueError(f"Unsupported field path: {path}")
-    parent_name, attribute = parts
-    parent = getattr(root, parent_name)
-    if not is_dataclass(parent):
-        raise TypeError(f"Target is not a dataclass: {parent_name}")
-    field_names = {item.name for item in fields(parent)}
-    if attribute not in field_names:
-        raise AttributeError(f"Unknown target attribute: {path}")
+def assertion_value_issues(assertion: EvidenceAssertion) -> list[str]:
+    try:
+        validate_assertion_value(assertion)
+    except AssertionValidationError as exc:
+        return [exc.code]
+    return []
 
-    coerced = _coerce(str(value), value_type)
-    if coerced is None and value_type in {"float", "int"}:
-        return
-    current = getattr(parent, attribute)
-    if value_type == "list":
-        merged = list(current or [])
+
+def _set_path(root: AssessmentInput, assertion: EvidenceAssertion) -> None:
+    parent, attribute, expected = _target(root, assertion.field_path)
+    coerced = validate_assertion_value(assertion, root)
+    if expected == "list":
+        merged = list(getattr(parent, attribute) or [])
         for item in coerced:
             if item not in merged:
                 merged.append(item)
@@ -321,24 +460,36 @@ def reviewed_assertion_conflicts(assertions: Iterable[EvidenceAssertion]) -> dic
 
 
 def apply_reviewed_assertions(inp: AssessmentInput, assertions: Iterable[EvidenceAssertion], *, documents: Iterable[DocumentRecord] | None = None) -> AssessmentInput:
-    """Apply only human-reviewed assertions to a copy of AssessmentInput."""
+    """Apply reviewed, valid assertions atomically to a copy of AssessmentInput."""
     assertions = list(assertions)
+    documents = list(documents) if documents is not None else None
+    reviewed = [item for item in assertions if item.review_status in REVIEWED_STATUSES]
+    for assertion in reviewed:
+        validate_assertion_value(assertion, inp)
+        issues = metadata_issues(assertion)
+        if issues:
+            raise ValueError(f"Assertion metadata invalid for {assertion.assertion_id}: " + ", ".join(issues))
+        if assertion.field_path == "ai_model.result" and assertion.evidence_kind != "prediction":
+            raise ValueError("AI model results require prediction evidence kind before application")
+        if assertion.field_path == "nam_assay.result" and assertion.evidence_kind != "observation":
+            raise ValueError("NAM results require explicit observation review before application")
+    conflicts = reviewed_assertion_conflicts(reviewed)
+    if conflicts:
+        raise ValueError("Resolve conflicting reviewed assertions before application: " + ", ".join(conflicts))
     if documents is not None:
         from .evidence_review import application_blockers
-        blockers = application_blockers(assertions, documents)
+        blockers = application_blockers(assertions, documents, assessment_input=inp)
         if blockers:
             raise ValueError("Source review required before application: " + ", ".join(blockers))
     updated = copy.deepcopy(inp)
-    reviewed = [item for item in assertions if item.review_status in REVIEWED_STATUSES]
-    conflicts = reviewed_assertion_conflicts(reviewed)
     for assertion in reviewed:
-        if assertion.field_path in conflicts:
-            continue
-        try:
-            _set_path(updated, assertion.field_path, assertion.proposed_value, assertion.value_type)
-        except (AttributeError, TypeError, ValueError):
-            continue
-
+        _set_path(updated, assertion)
+    if documents is not None:
+        # Reviewed context fields may also change the target subject/endpoint.
+        # Recheck the final card so those edits cannot rebind another study's result.
+        blockers = application_blockers(assertions, documents, assessment_input=updated)
+        if blockers:
+            raise ValueError("Source review required for final assessment scope: " + ", ".join(blockers))
     if reviewed:
         updated.supporting_evidence.assertions_reviewed = True
         updated.supporting_evidence.evidence_traceable = all(
@@ -355,11 +506,14 @@ def assertion_table_rows(assertions: Iterable[EvidenceAssertion]) -> list[dict[s
             "평가 필드": item.label_ko,
             "Field Path": item.field_path,
             "제안/수정 값": item.proposed_value,
+            "Original extracted value": item.extracted_value,
+            "Evidence kind": item.evidence_kind,
+            **{f"Scope {key}": item.scope.get(key, "") if isinstance(item.scope, dict) else "" for key in SCOPE_KEYS},
             "형식": item.value_type,
             "출처 문서": item.source_document_name,
             "출처 위치": item.source_location,
             "근거 발췌": item.source_excerpt,
-            "추출 신뢰도": item.confidence,
+            "Extraction heuristic (uncalibrated)": item.confidence,
             "검토 상태": item.review_status,
             "검토 메모": item.reviewer_note,
         }
@@ -372,11 +526,26 @@ def assertions_from_table_rows(rows: Iterable[dict[str, Any]], existing: Iterabl
     output: list[EvidenceAssertion] = []
     for row in rows:
         assertion_id = str(row.get("Assertion ID", ""))
-        base = existing_by_id.get(assertion_id)
-        if not base:
+        original = existing_by_id.get(assertion_id)
+        if not original:
             continue
+        # Provenance, field targets and the extracted value always come from the
+        # existing record, never from editable table data.
+        base = copy.deepcopy(original)
         base.proposed_value = str(row.get("제안/수정 값", base.proposed_value))
+        base.evidence_kind = str(row.get("Evidence kind", base.evidence_kind))
+        scope = dict(base.scope) if isinstance(base.scope, dict) else {}
+        for key in SCOPE_KEYS:
+            if f"Scope {key}" in row:
+                value = str(row[f"Scope {key}"]).strip()
+                if value:
+                    scope[key] = value
+                else:
+                    scope.pop(key, None)
+        base.scope = scope
         base.review_status = str(row.get("검토 상태", base.review_status))
         base.reviewer_note = str(row.get("검토 메모", base.reviewer_note))
+        if (base.proposed_value, base.evidence_kind, base.scope) != (original.proposed_value, original.evidence_kind, original.scope):
+            base.review_status = "제안됨"
         output.append(base)
     return output
