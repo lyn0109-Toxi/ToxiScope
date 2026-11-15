@@ -25,8 +25,8 @@ SOURCE_TIERS = {
     },
     "qsar": {
         "rank": 5,
-        "label": "Tier 5 - QSAR / Predictive",
-        "confidence": "Medium",
+        "label": "Tier 5 - Rule-based Structural Screening",
+        "confidence": "Low",
     },
     "inference": {
         "rank": 6,
@@ -79,13 +79,10 @@ def sort_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def summarize_concordance(expert_alerts: list[dict], statistical_alerts: list[dict]) -> str:
-    expert_names = {a.get("alert") for a in expert_alerts}
-    stat_names = {a.get("alert") for a in statistical_alerts}
-    if not expert_names and not stat_names:
-        return "Concordant negative"
-    if expert_names and stat_names and expert_names.intersection(stat_names):
-        return "Concordant positive"
-    if expert_names or stat_names:
-        return "Discordant or partially supported"
-    return "Insufficient evidence"
+    """Compatibility helper; overlapping rules cannot establish model concordance.
+
+    The application has one SMARTS screening implementation and no independent
+    statistical model. An empty alert list is not a negative mutagenicity result.
+    """
+    return "Not assessed (one rule-based screen; no independent model)"
 

@@ -12,14 +12,14 @@ POLICY_RANGE = "R01-R13"
 
 POLICY_RULES = [
     {"id": "R01", "name": "Think Before Coding", "check": "Assessment states purpose and scope."},
-    {"id": "R02", "name": "Simplicity First", "check": "Output keeps ICH M7 decision logic direct and explainable."},
+    {"id": "R02", "name": "Simplicity First", "check": "Output keeps screening logic direct and explainable."},
     {"id": "R03", "name": "Surgical Changes", "check": "Only requested toxicology evidence workflow is affected."},
     {"id": "R04", "name": "Plan Work Review", "check": "Result contains validation gates and worker-report."},
     {"id": "R05", "name": "Regulatory Sync", "check": "Assessment maps to ICH M7 and Q3A/Q3B where relevant."},
     {"id": "R06", "name": "RDKit Availability", "check": "RDKit import status is recorded."},
     {"id": "R07", "name": "Evidence Required", "check": "Every decision has structured evidence objects."},
-    {"id": "R08", "name": "Dual QSAR", "check": "Expert and statistical calls are separated."},
-    {"id": "R09", "name": "Source Tiering", "check": "Sources are tiered by guideline, compendial, identity, experimental, QSAR, or inference."},
+    {"id": "R08", "name": "Screening Transparency", "check": "Output labels rule-based screening and discloses the absent statistical model."},
+    {"id": "R09", "name": "Source Tiering", "check": "Sources are tiered by guideline, compendial, identity, experimental, screening, or inference."},
     {"id": "R10", "name": "Structural Explanation", "check": "Alerting substructure and mechanism are explained."},
     {"id": "R11", "name": "Degradation Link", "check": "Known or predicted degradants are assessed when available."},
     {"id": "R12", "name": "CTD Readiness", "check": "Narrative links decision to submission language."},
@@ -44,6 +44,7 @@ def get_harness_manifest(project_id: str = "TXS-2026-001", analyst: str = "Lee Y
         "analyst": analyst,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "rules": POLICY_RULES,
+        "scope": "Software workflow and output completeness checks only; not scientific validation or regulatory acceptance.",
     }
 
 
@@ -70,9 +71,9 @@ def validate_assessment(result: dict[str, Any]) -> list[dict[str, Any]]:
             f"{len(evidence)} structured evidence item(s) attached.",
         ),
         HarnessGate(
-            "Dual QSAR",
-            "pass" if "expert_call" in qsar and "statistical_call" in qsar else "review",
-            f"Expert={qsar.get('expert_call', 'N/A')}; Statistical={qsar.get('statistical_call', 'N/A')}.",
+            "Screening Transparency",
+            "pass" if result.get("screening_method") and result.get("limitations") and "Not performed" in qsar.get("statistical_call", "") else "review",
+            f"Method={result.get('screening_method', 'Not recorded')}; statistical model={qsar.get('statistical_call', 'Not recorded')}. This checks disclosure, not predictive validity.",
         ),
         HarnessGate(
             "Structural Explanation",
@@ -81,8 +82,8 @@ def validate_assessment(result: dict[str, Any]) -> list[dict[str, Any]]:
         ),
         HarnessGate(
             "ICH M7 Classification",
-            "pass" if result.get("class", "").startswith("ICH M7 Class") else "fail",
-            result.get("class", "No class returned."),
+            "review",
+            "No final ICH M7 class is established by this rule-based screen. Qualified evidence review is required.",
         ),
         HarnessGate(
             "Alert Traceability",
@@ -123,7 +124,7 @@ def validate_package(package: dict[str, Any]) -> list[dict[str, Any]]:
                 HarnessGate(
                     "Regulatory Narrative",
                     "pass" if len(narrative) > 80 else "review",
-                    "Narrative generated for CTD/briefing use." if narrative else "Narrative missing.",
+                    "Draft narrative generated for expert review." if narrative else "Narrative missing.",
                 )
             ),
         ]
@@ -149,11 +150,14 @@ def build_worker_report(
             "classification": assessment.get("class"),
             "status": assessment.get("status"),
             "qsar_concordance": assessment.get("qsar_summary", {}).get("concordance"),
+            "screening_method": assessment.get("screening_method"),
+            "limitations": assessment.get("limitations", []),
             "evidence_count": len(assessment.get("evidence_objects", [])),
             "known_impurity_count": len(package.get("known_impurity_matches", [])),
             "degradation_product_count": len(package.get("degradation_products", [])),
         },
         "validation": {
+            "scope": "Software workflow and output completeness checks only; not scientific validation or regulatory acceptance.",
             "passed": passed,
             "review": review,
             "failed": failed,
@@ -161,6 +165,6 @@ def build_worker_report(
         },
         "decision": {
             "use": "decision support",
-            "limitation": "Not a substitute for validated QSAR platforms, experimental mutagenicity testing, or qualified regulatory expert sign-off.",
+            "limitation": "Limited rule-based structural screening only. No trained statistical model, calibrated mutagenicity probability, independent-model concordance, or final ICH M7 class is provided. No-alert and shared-alert findings require review. Local historical dossier assertions require source verification. Workflow checks do not establish scientific validity or regulatory acceptance.",
         },
     }

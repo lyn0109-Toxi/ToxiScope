@@ -1,22 +1,35 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from .evidence import make_evidence, sort_evidence, summarize_concordance
 
 
+SCREENING_METHOD = "Rule-based structural alert screening"
+UNASSIGNED_CLASS = "Not assigned (expert review required)"
+SCREENING_LIMITATIONS = [
+    "Limited hand-coded SMARTS screen; no trained statistical model or independent second model is implemented.",
+    "No calibrated mutagenicity probabilities, performance validation or validated applicability domain are available.",
+    "Absence of a matched rule does not establish a negative mutagenicity result or safety.",
+    "A shared rule motif with the drug substance does not establish equivalent reactivity, safety or impurity control.",
+    "ICH M7 classification requires qualified review and supporting evidence; this screen does not assign a class.",
+    "Local historical dossier entries and their citations have not been independently verified.",
+]
+
+
 ASHBY_ALERTS: dict[str, dict[str, Any]] = {
     "Aromatic Amine": {
         "smarts": "[NX3;H2,H1;!$(NC=O)]-c1ccccc1",
-        "likelihood": "Certain",
-        "mechanism": "Metabolic activation to nitrenium ions, causing DNA adducts.",
+        "likelihood": "Not estimated (rule match only)",
+        "mechanism": "Potential metabolic activation to DNA-reactive nitrenium ions; relevance requires expert review.",
         "reference": "ICH M7(R2); Ashby & Tennant structural alert framework",
         "priority": "Critical",
         "expert_comment": "Primary aromatic amines/anilines are key structural alerts for bacterial mutagenicity.",
     },
     "Fused-Ring Aromatic Amine": {
         "smarts": "[NX3;H2,H1;!$(NC=O)]-c1ccc2ccccc2c1",
-        "likelihood": "Certain",
+        "likelihood": "Not estimated (rule match only)",
         "mechanism": "Planar fused rings may enhance DNA interaction; amine activation can form DNA-reactive species.",
         "reference": "IARC monograph context; ICH M7 expert review principle",
         "priority": "Critical",
@@ -24,7 +37,7 @@ ASHBY_ALERTS: dict[str, dict[str, Any]] = {
     },
     "Nitro Group": {
         "smarts": "[N+](=O)[O-]",
-        "likelihood": "Plausible",
+        "likelihood": "Not estimated (rule match only)",
         "mechanism": "Reductive metabolism can form hydroxylamine/nitrenium-like DNA-reactive intermediates.",
         "reference": "ICH M7(R2); Kazius et al. structural alert literature",
         "priority": "High",
@@ -32,7 +45,7 @@ ASHBY_ALERTS: dict[str, dict[str, Any]] = {
     },
     "Epoxide / Aziridine": {
         "smarts": "C1[O,N]C1",
-        "likelihood": "Certain",
+        "likelihood": "Not estimated (rule match only)",
         "mechanism": "Strained three-membered rings can directly alkylate nucleophilic DNA sites via ring opening.",
         "reference": "ICH M7(R2) DNA-reactive alert principle; Miller & Miller electrophile framework",
         "priority": "Critical",
@@ -40,7 +53,7 @@ ASHBY_ALERTS: dict[str, dict[str, Any]] = {
     },
     "Alkyl Halide / Acyl Halide": {
         "smarts": "[CX4,CX3][Cl,Br,I]",
-        "likelihood": "Plausible",
+        "likelihood": "Not estimated (rule match only)",
         "mechanism": "Electrophilic carbon-halogen centers can alkylate biological nucleophiles depending on stability and exposure.",
         "reference": "ICH M7(R2) expert review principle",
         "priority": "High",
@@ -52,22 +65,32 @@ ASHBY_ALERTS: dict[str, dict[str, Any]] = {
 EXPERIMENTAL_DB = {
     "Nc1ccccc1": {
         "name": "Aniline",
+        "verification_status": "unverified",
+        "source_verified": False,
         "assay_data": [
             {"test": "Ames (TA98)", "result": "Positive", "condition": "+S9 activation", "source": "NTP TR-211"},
             {"test": "Ames (TA100)", "result": "Positive", "condition": "+S9 activation", "source": "NTP TR-211"},
             {"test": "In vitro micronucleus", "result": "Positive", "condition": "Human lymphocytes", "source": "IARC Vol. 77"},
         ],
-        "overall_conclusion": "Mutagenic under metabolic activation in the local evidence dossier.",
+        "overall_conclusion": "The local dossier reports mutagenicity under metabolic activation. Its assay assertions and citations have not been independently verified.",
     }
 }
 
 
 KNOWN_MUTAGENS = {
-    "Nc1ccccc1": {"class": 2, "name": "Aniline", "evidence": "Positive Ames evidence in local NTP dossier"},
+    "Nc1ccccc1": {
+        "class": 2,
+        "name": "Aniline",
+        "evidence": "Local dossier reports positive Ames evidence and cites NTP; not independently verified",
+        "verification_status": "unverified",
+        "source_verified": False,
+    },
     "c1ccc2c(c1)ccc3c2ccc4c3ccc5c4cccc5": {
         "class": 1,
         "name": "Benzo[a]pyrene",
-        "evidence": "Known carcinogen/mutagen reference in local dossier",
+        "evidence": "Local dossier labels this structure as a carcinogen/mutagen; identity and source assertions not independently verified",
+        "verification_status": "unverified",
+        "source_verified": False,
     },
 }
 
@@ -106,6 +129,11 @@ def _matched_atoms(mol: Any, pattern: Any) -> list[list[int]]:
 
 
 def get_expert_rule_assessment(smiles: str) -> list[dict[str, Any]]:
+    """Return matched hand-coded rules, not a mutagenicity prediction.
+
+    An empty list is only a list of matches. It does not establish a negative
+    result; use assess_mutagenicity for input/dependency errors and limitations.
+    """
     try:
         from rdkit import Chem
     except ImportError:
@@ -122,7 +150,7 @@ def get_expert_rule_assessment(smiles: str) -> list[dict[str, Any]]:
             atoms = _matched_atoms(mol, pattern)
             results.append(
                 {
-                    "method": "Expert Rule-based",
+                    "method": SCREENING_METHOD,
                     "alert": name,
                     "likelihood": data["likelihood"],
                     "mechanism": data["mechanism"],
@@ -137,43 +165,21 @@ def get_expert_rule_assessment(smiles: str) -> list[dict[str, Any]]:
 
 
 def get_statistical_assessment(smiles: str) -> list[dict[str, Any]]:
-    try:
-        from rdkit import Chem
-    except ImportError:
-        return []
+    """Deprecated compatibility API: no statistical model is implemented.
 
-    mol = Chem.MolFromSmiles(smiles)
-    if not mol:
-        return []
-
-    statistical_rules = [
-        ("Aromatic Amine", "[NX3;H2,H1;!$(NC=O)]-c1ccccc1", 0.82),
-        ("Nitro Group", "[N+](=O)[O-]", 0.75),
-        ("Epoxide / Aziridine", "C1[O,N]C1", 0.79),
-        ("Alkyl Halide / Acyl Halide", "[CX4,CX3][Cl,Br,I]", 0.67),
-    ]
-    results = []
-    for alert, smarts, probability in statistical_rules:
-        pattern = Chem.MolFromSmarts(smarts)
-        if pattern and mol.HasSubstructMatch(pattern):
-            results.append(
-                {
-                    "method": "Statistical (SAR)",
-                    "alert": alert,
-                    "probability": probability,
-                    "reference": "Internal transparent fragment model; replace with validated statistical QSAR engine for production use",
-                    "reasoning": f"Fragment associated with bacterial mutagenicity model signal was present; estimated probability {int(probability * 100)}%.",
-                    "matched_atoms": _matched_atoms(mol, pattern),
-                }
-            )
-    return results
+    Always returns an empty list, meaning no statistical assessment was
+    performed, never a negative prediction. Rule matches are available from
+    get_expert_rule_assessment; assessment metadata states the missing method.
+    """
+    return []
 
 
 def get_experimental_detail(smiles: str | None) -> dict[str, Any] | None:
     can_smiles = canonicalize_smiles(smiles)
     if not can_smiles:
         return None
-    return EXPERIMENTAL_DB.get(can_smiles) or EXPERIMENTAL_DB.get(smiles or "")
+    record = EXPERIMENTAL_DB.get(can_smiles) or EXPERIMENTAL_DB.get(smiles or "")
+    return deepcopy(record) if record else None
 
 
 def _experimental_evidence(smiles: str, compound: str) -> list[dict[str, Any]]:
@@ -186,18 +192,47 @@ def _experimental_evidence(smiles: str, compound: str) -> list[dict[str, Any]]:
             make_evidence(
                 compound=exp["name"],
                 smiles=smiles,
-                evidence_type="experimental assay",
+                evidence_type="unverified local assay assertion",
                 endpoint=assay["test"],
-                result=assay["result"],
-                source_tier="experimental",
-                source_name=assay["source"],
-                reasoning=f"{assay['test']} result was {assay['result']} under {assay['condition']}.",
-                confidence="High",
-                regulatory_mapping=["ICH M7(R2)", "Bacterial mutagenicity evidence"],
-                details=assay,
+                result=f"Local dossier reports {assay['result']} (unverified)",
+                source_tier="inference",
+                source_name=f"Unverified local dossier citation: {assay['source']}",
+                reasoning=f"The local dossier reports {assay['test']}: {assay['result']} under {assay['condition']}. The source and assay assertion have not been independently verified.",
+                confidence="Low",
+                regulatory_mapping=["Source verification required before ICH M7 interpretation"],
+                details={**assay, "verification_status": "unverified", "source_verified": False},
             )
         )
     return evidence
+
+
+def _screening_summary(expert_alerts: list[dict[str, Any]]) -> dict[str, str]:
+    return {
+        "expert_call": "Alert identified" if expert_alerts else "No alert identified in implemented rules",
+        "statistical_call": "Not performed (no statistical model implemented)",
+        "concordance": summarize_concordance(expert_alerts, []),
+        "applicability_domain": "Limited SMARTS rule coverage; applicability domain and predictive performance have not been validated.",
+    }
+
+
+def _screening_error(message: str) -> dict[str, Any]:
+    summary = _screening_summary([])
+    summary["expert_call"] = "Not performed (screening error)"
+    return {
+        "status": "error",
+        "message": message,
+        "class": UNASSIGNED_CLASS,
+        "screening_method": SCREENING_METHOD,
+        "alerts": [],
+        "expert_alerts": [],
+        "statistical_alerts": [],
+        "historical_evidence": [],
+        "shared_alerts": [],
+        "qsar_summary": summary,
+        "evidence_objects": [],
+        "limitations": list(SCREENING_LIMITATIONS),
+        "note": "Screening was not completed. Expert review is required.",
+    }
 
 
 def assess_mutagenicity(
@@ -206,197 +241,140 @@ def assess_mutagenicity(
     daily_dose_mg: float = 10,
     compound_name: str = "Submitted compound",
 ) -> dict[str, Any]:
+    """Screen limited structural rules without predicting safety or an ICH class.
+
+    Legacy statistical/qsar keys remain for callers, with an explicit missing
+    statistical method. Local dossier assertions are unverified source leads.
+    """
     try:
         from rdkit import Chem
     except ImportError:
-        return {"status": "error", "message": "RDKit not installed", "alerts": [], "evidence_objects": []}
+        return _screening_error("RDKit not installed")
 
+    if not isinstance(smiles, str) or not smiles.strip():
+        return _screening_error("Invalid SMILES")
     mol = Chem.MolFromSmiles(smiles)
     if not mol:
-        return {"status": "error", "message": "Invalid SMILES", "alerts": [], "evidence_objects": []}
+        return _screening_error("Invalid SMILES")
 
     can_smiles = Chem.MolToSmiles(mol, isomericSmiles=True)
-    ttc_info = calculate_ttc_limit(daily_dose_mg)
-    evidence = [
-        make_evidence(
-            compound=compound_name,
-            smiles=can_smiles,
-            evidence_type="guideline",
-            endpoint="ICH M7 scope",
-            result="Assessment initiated",
-            source_tier="guideline",
-            source_name="ICH M7(R2)",
-            source_url="https://www.fda.gov/regulatory-information/search-fda-guidance-documents/questions-and-answers-m7r2-assessment-and-control-dna-reactive-mutagenic-impurities-pharmaceuticals",
-            reasoning="ICH M7 focuses on DNA-reactive mutagenic impurities and accepts complementary QSAR methods as an initial assessment.",
-            confidence="High",
-            regulatory_mapping=["ICH M7(R2)", "ICH Q3A/Q3B interface"],
-        )
-    ]
-
-    if can_smiles in KNOWN_MUTAGENS:
-        known = KNOWN_MUTAGENS[can_smiles]
-        structural_alerts = get_expert_rule_assessment(can_smiles)
-        alert = {
-            "method": "Historical Evidence",
-            "alert": "Known Mutagen/Carcinogen",
-            "evidence": known["evidence"],
-            "mechanism": "Confirmed in historical toxicology studies.",
-            "reference": known["evidence"],
-            "reasoning": known["evidence"],
-        }
-        all_known_alerts = [alert] + structural_alerts
-        evidence.append(
-            make_evidence(
-                compound=known["name"],
-                smiles=can_smiles,
-                evidence_type="historical toxicology",
-                endpoint="bacterial mutagenicity / carcinogenicity",
-                result="Known positive",
-                source_tier="experimental",
-                source_name=known["evidence"],
-                reasoning="The submitted structure matched a known mutagen/carcinogen record in the local evidence dossier.",
-                confidence="High",
-                method="Historical Evidence",
-                alert="Known Mutagen/Carcinogen",
-                mechanism=alert["mechanism"],
-                regulatory_mapping=["ICH M7 Class 1/2 logic"],
-            )
-        )
-        for structural_alert in structural_alerts:
-            evidence.append(
-                make_evidence(
-                    compound=compound_name,
-                    smiles=can_smiles,
-                    evidence_type="QSAR alert",
-                    endpoint="bacterial mutagenicity",
-                    result="Alert",
-                    source_tier="qsar",
-                    source_name="Expert rule-based QSAR",
-                    reasoning=structural_alert["reasoning"],
-                    confidence="Medium",
-                    method=structural_alert["method"],
-                    alert=structural_alert["alert"],
-                    mechanism=structural_alert["mechanism"],
-                    regulatory_mapping=["ICH M7(R2) complementary QSAR Method 1"],
-                    details=structural_alert,
-                )
-            )
-        structural_text = alert["reasoning"]
-        if structural_alerts:
-            structural_text = f"{alert['reasoning']} | " + " | ".join(
-                f"{a['alert']}: {a['mechanism']}" for a in structural_alerts
-            )
-        return {
-            "status": "alert",
-            "class": f"ICH M7 Class {known['class']}",
-            "alerts": all_known_alerts,
-            "expert_alerts": all_known_alerts,
-            "statistical_alerts": [],
-            "qsar_summary": {"concordance": "Historical positive", "expert_call": "Positive", "statistical_call": "Not required"},
-            "structural_explanation": structural_text,
-            "evidence_objects": sort_evidence(evidence + _experimental_evidence(can_smiles, compound_name)),
-            "ttc_info": ttc_info,
-            "canonical_smiles": can_smiles,
-        }
-
     expert_alerts = get_expert_rule_assessment(can_smiles)
-    stat_alerts = get_statistical_assessment(can_smiles)
-    all_alerts = expert_alerts + stat_alerts
-
+    evidence = []
     for alert in expert_alerts:
         evidence.append(
             make_evidence(
                 compound=compound_name,
                 smiles=can_smiles,
-                evidence_type="QSAR alert",
-                endpoint="bacterial mutagenicity",
-                result="Alert",
+                evidence_type="structural rule match",
+                endpoint="bacterial mutagenicity screening",
+                result="Rule matched; mutagenicity not determined",
                 source_tier="qsar",
-                source_name="Expert rule-based QSAR",
+                source_name=SCREENING_METHOD,
                 reasoning=alert["reasoning"],
-                confidence="Medium",
-                method=alert["method"],
+                confidence="Low",
+                method=SCREENING_METHOD,
                 alert=alert["alert"],
                 mechanism=alert["mechanism"],
-                regulatory_mapping=["ICH M7(R2) complementary QSAR Method 1"],
+                regulatory_mapping=["Expert review required; no ICH M7 class assigned"],
                 details=alert,
             )
         )
 
-    for alert in stat_alerts:
+    shared_alerts = []
+    ds_note = ""
+    if drug_substance_smiles:
+        ds_mol = Chem.MolFromSmiles(drug_substance_smiles)
+        if ds_mol:
+            for alert in expert_alerts:
+                pattern = Chem.MolFromSmarts(ASHBY_ALERTS[alert["alert"]]["smarts"])
+                if pattern and ds_mol.HasSubstructMatch(pattern):
+                    shared_alerts.append(alert["alert"])
+            if shared_alerts:
+                ds_note = (
+                    " Shared rule motif(s) with the drug substance: " + ", ".join(shared_alerts)
+                    + ". Motif overlap alone does not establish equivalent reactivity, a negative drug-substance result or impurity control; expert review remains required."
+                )
+        else:
+            ds_note = " Drug-substance SMILES was invalid; shared-motif comparison was not performed."
+
+    historical_evidence = []
+    # Keep local assertions as source leads, including their original class hint.
+    # Neither the cited assays nor the dossier's identity/class claims are verified.
+    known = next(
+        (record for key, record in KNOWN_MUTAGENS.items() if canonicalize_smiles(key) == can_smiles),
+        None,
+    )
+    if known:
+        historical = {
+            "method": "Unverified local dossier",
+            "alert": "Local historical record (unverified)",
+            "name": known["name"],
+            "evidence": known["evidence"],
+            "reference": known["evidence"],
+            "reported_ich_m7_class": known["class"],
+            "verification_status": "unverified",
+            "source_verified": False,
+            "reasoning": "A local dossier entry matches the submitted structure. Its identity, toxicology and class assertions have not been independently verified; source review is required.",
+        }
+        historical_evidence.append(historical)
         evidence.append(
             make_evidence(
-                compound=compound_name,
+                compound=known["name"],
                 smiles=can_smiles,
-                evidence_type="QSAR alert",
-                endpoint="bacterial mutagenicity",
-                result="Alert",
-                source_tier="qsar",
-                source_name="Statistical SAR model",
-                reasoning=alert["reasoning"],
-                confidence="Medium",
-                method=alert["method"],
-                alert=alert["alert"],
-                regulatory_mapping=["ICH M7(R2) complementary QSAR Method 2"],
-                details=alert,
+                evidence_type="unverified local historical assertion",
+                endpoint="reported mutagenicity / carcinogenicity",
+                result="Local dossier assertion; unverified",
+                source_tier="inference",
+                source_name="Unverified local historical dossier",
+                reasoning=historical["reasoning"],
+                confidence="Low",
+                method=historical["method"],
+                alert=historical["alert"],
+                regulatory_mapping=["Source verification required; no ICH M7 class assigned"],
+                details=historical,
             )
         )
-
     evidence.extend(_experimental_evidence(can_smiles, compound_name))
 
-    if not all_alerts:
+    if expert_alerts:
+        note = "Structural rule match(es) require expert review. Mutagenicity is undetermined and no ICH M7 class is assigned."
+        structural_explanation = " | ".join(f"{a['alert']}: {a['mechanism']}" for a in expert_alerts)
+    else:
+        note = "No alert identified in the limited implemented rules. Mutagenicity remains undetermined; this is not a negative result or a safety conclusion."
+        structural_explanation = "No alert identified in implemented SMARTS rules; rule coverage is limited and has not been validated."
         evidence.append(
             make_evidence(
                 compound=compound_name,
                 smiles=can_smiles,
-                evidence_type="QSAR conclusion",
-                endpoint="bacterial mutagenicity",
-                result="No alert identified",
+                evidence_type="structural screening observation",
+                endpoint="bacterial mutagenicity screening",
+                result="No rule matched; mutagenicity undetermined",
                 source_tier="qsar",
-                source_name="Dual-method QSAR screen",
-                reasoning="No expert-rule or transparent statistical fragment alert was identified. This supports ICH M7 Class 5 only within model applicability and source limitations.",
-                confidence="Medium",
-                regulatory_mapping=["ICH M7 Class 5"],
+                source_name=SCREENING_METHOD,
+                reasoning=note,
+                confidence="Low",
+                method=SCREENING_METHOD,
+                regulatory_mapping=["Expert review required; no ICH M7 class assigned"],
+                details={"limitations": list(SCREENING_LIMITATIONS)},
             )
         )
-        final_class = "ICH M7 Class 5"
-        status = "safe"
-    else:
-        final_class = "ICH M7 Class 3"
-        status = "alert"
-        note = "Alerting structure is not demonstrated to be shared with the drug substance; treat as Class 3 pending expert review or negative bacterial mutagenicity evidence."
-        if drug_substance_smiles:
-            ds_mol = Chem.MolFromSmiles(drug_substance_smiles)
-            if ds_mol:
-                for alert in expert_alerts:
-                    pattern = Chem.MolFromSmarts(ASHBY_ALERTS[alert["alert"]]["smarts"])
-                    if pattern and ds_mol.HasSubstructMatch(pattern):
-                        final_class = "ICH M7 Class 4"
-                        status = "controlled"
-                        note = f"Alerting feature '{alert['alert']}' is also present in the drug substance; provisional ICH M7 Class 4 logic applied pending expert review."
-                        break
-
-    structural_explanation = "No DNA-reactive structural alert was identified."
-    if expert_alerts:
-        structural_explanation = " | ".join(f"{a['alert']}: {a['mechanism']}" for a in expert_alerts)
-    elif stat_alerts:
-        structural_explanation = " | ".join(f"{a['alert']}: statistical fragment signal only" for a in stat_alerts)
+    if historical_evidence:
+        note += " A local historical dossier entry also requires source verification before use."
 
     return {
-        "status": status,
-        "class": final_class,
-        "alerts": all_alerts,
+        "status": "review" if historical_evidence or not expert_alerts else "alert",
+        "class": UNASSIGNED_CLASS,
+        "screening_method": SCREENING_METHOD,
+        "alerts": expert_alerts + historical_evidence,
         "expert_alerts": expert_alerts,
-        "statistical_alerts": stat_alerts,
-        "qsar_summary": {
-            "expert_call": "Positive" if expert_alerts else "Negative",
-            "statistical_call": "Positive" if stat_alerts else "Negative",
-            "concordance": summarize_concordance(expert_alerts, stat_alerts),
-            "applicability_domain": "Transparent SMARTS/fragment domain; production use requires validated model AD documentation.",
-        },
+        "statistical_alerts": [],
+        "historical_evidence": historical_evidence,
+        "shared_alerts": shared_alerts,
+        "qsar_summary": _screening_summary(expert_alerts),
         "structural_explanation": structural_explanation,
         "evidence_objects": sort_evidence(evidence),
-        "ttc_info": ttc_info,
+        "ttc_info": calculate_ttc_limit(daily_dose_mg),
         "canonical_smiles": can_smiles,
-        "note": note if all_alerts else "No alert identified by the current expert/statistical screen; provisional ICH M7 Class 5 within model limitations.",
+        "limitations": list(SCREENING_LIMITATIONS),
+        "note": note + ds_note,
     }

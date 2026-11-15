@@ -2,8 +2,8 @@ FDA_GUIDANCE_MAP = [
     {
         "Area": "Toxicology / Mutagenic impurities",
         "Primary basis": "ICH M7(R2)",
-        "Platform module": "QSAR & Genotoxicity",
-        "Decision use": "Classify DNA-reactive impurity risk and identify required follow-up.",
+        "Platform module": "Structural Alert Screening",
+        "Decision use": "Flag implemented structural alerts and identify evidence-review needs; no final ICH M7 class is assigned.",
     },
     {
         "Area": "Impurity / degradant control",
@@ -21,7 +21,7 @@ FDA_GUIDANCE_MAP = [
         "Area": "Submission narrative",
         "Primary basis": "FDA eCTD/CTD quality and nonclinical structure",
         "Platform module": "Report Builder",
-        "Decision use": "Convert evidence into submission-ready regulatory language.",
+        "Decision use": "Convert evidence into draft regulatory language for qualified review.",
     },
 ]
 
@@ -36,8 +36,8 @@ ROLE_GUIDANCE = {
         "next_action": "Align impurity/degradant controls with method validation, stability data, and dissolution acceptance criteria.",
     },
     "Nonclinical / Toxicology": {
-        "focus": "ICH M7 class, QSAR concordance, toxicophore mapping, and experimental follow-up.",
-        "next_action": "Review structural alerts, applicability domain, and need for Ames or expert review.",
+        "focus": "Structural alert screening, evidence gaps, and experimental follow-up for ICH M7 review.",
+        "next_action": "Review rule coverage, source verification, and need for additional assessment or experimental evidence.",
     },
     "Executive / Portfolio": {
         "focus": "Development risk, timeline exposure, and go/no-go clarity.",
@@ -48,15 +48,14 @@ ROLE_GUIDANCE = {
 
 def classify_toxicology_risk(results):
     if not results:
-        return "Not started", "Run QSAR/genotoxicity assessment."
-    ich_class = results.get("class", "")
-    if "Class 1" in ich_class or "Class 2" in ich_class:
-        return "High", "Known or probable mutagenic concern. Prepare expert review and control strategy."
-    if "Class 3" in ich_class:
-        return "Medium", "Structural alert detected. Confirm relevance, TTC control, and follow-up evidence."
-    if "Class 4" in ich_class:
-        return "Medium", "Alert shared with drug substance. Document read-across and justification."
-    return "Low", "No structural alert identified within current model scope."
+        return "Not started", "Run structural alert screening and review supporting evidence."
+    if results.get("status") == "error":
+        return "Review needed", "Screening did not complete. Resolve the input or dependency error before evidence review."
+    if results.get("historical_evidence"):
+        return "Review needed", "Local historical dossier assertions require source verification and qualified review."
+    if results.get("expert_alerts") or results.get("status") == "alert":
+        return "Review needed", "Structural alert detected. Review relevance and additional evidence; no final ICH M7 class or control decision is established."
+    return "Review needed", "No alert or missing output from limited rule screening cannot establish low risk or a negative mutagenicity finding."
 
 
 def classify_be_risk(be_result):
@@ -78,11 +77,17 @@ def classify_degradation_risk(degradants):
         if "Class 1" in str(item.get("class")) or "Class 2" in str(item.get("class")) or item.get("risk") == "High"
     ]
     if high_risk:
-        return "High", "One or more degradants may require mutagenic impurity control strategy."
-    review_items = [item for item in degradants if not item.get("smiles")]
+        return "High", "One or more degradation entries are flagged for priority review. This heuristic priority does not establish mutagenicity or an ICH M7 class."
+    review_items = [
+        item for item in degradants
+        if not item.get("smiles")
+        or item.get("smiles") == "Structure not loaded"
+        or item.get("status") in {"review", "error", "alert"}
+        or not str(item.get("class", "")).startswith("ICH M7 Class")
+    ]
     if review_items:
-        return "Medium", "Some degradant structures are not loaded. Add qualified structures for QSAR review."
-    return "Low", "No high-risk degradant signal in current curated/predicted profile."
+        return "Review needed", "Degradant screening or structure evidence requires review; absence of a rule alert does not establish low mutagenic risk."
+    return "Review needed", "Review degradant source evidence and structural screening limitations before drawing a risk conclusion."
 
 
 def build_strategy_snapshot(results=None, degradants=None, be_result=None, role="Regulatory Affairs"):
@@ -94,7 +99,7 @@ def build_strategy_snapshot(results=None, degradants=None, be_result=None, role=
         overall = "High"
     elif "Medium" in module_risks:
         overall = "Medium"
-    elif "Not started" in module_risks:
+    elif "Not started" in module_risks or "Review needed" in module_risks:
         overall = "Review needed"
     else:
         overall = "Low"
@@ -107,7 +112,7 @@ def build_strategy_snapshot(results=None, degradants=None, be_result=None, role=
         "role_focus": role_item["focus"],
         "role_next_action": role_item["next_action"],
         "module_actions": [
-            {"Module": "QSAR / Genotoxicity", "Risk": tox_risk, "Next action": tox_action},
+            {"Module": "Structural Alert Screening", "Risk": tox_risk, "Next action": tox_action},
             {"Module": "Impurity / Degradation", "Risk": deg_risk, "Next action": deg_action},
             {"Module": "Bioequivalence", "Risk": be_risk, "Next action": be_action},
             {"Module": "Regulatory Evidence", "Risk": "Review needed", "Next action": "Map FDA/ICH/USP sources to the selected submission pathway."},
@@ -118,7 +123,7 @@ def build_strategy_snapshot(results=None, degradants=None, be_result=None, role=
 def build_submission_workflow(results=None, degradants=None, be_result=None):
     return [
         {"Step": "1. Product profile", "Status": "Ready", "Output": "Project, product, route, dosage form, and submission pathway defined."},
-        {"Step": "2. QSAR / genotoxicity", "Status": "Ready" if results else "Pending", "Output": "ICH M7 class, toxicophore map, and evidence matrix."},
+        {"Step": "2. Structural alert screening", "Status": "Review needed" if results else "Pending", "Output": "Limited rule-screen findings and evidence matrix for qualified ICH M7 review; no final class."},
         {"Step": "3. Degradation / impurity", "Status": "Ready" if degradants else "Pending", "Output": "Known/predicted degradants, structure map, source review queue."},
         {"Step": "4. Bioequivalence", "Status": "Ready" if be_result else "Pending", "Output": "FDA f2/bootstrap result and BE strategy decision."},
         {"Step": "5. Source mapping", "Status": "In progress", "Output": "FDA/ICH/USP/EP/DMF evidence basis."},

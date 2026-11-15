@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from urllib.parse import quote_plus
 from typing import Any
 
@@ -206,7 +207,9 @@ def get_pharmacopeia_info(name: str | None) -> dict[str, Any] | None:
     query = name.strip().lower()
     for drug, data in PHARMACOPEIA_DB.items():
         if query in drug.lower() or drug.lower() in query:
-            return data
+            profile = deepcopy(data)
+            profile["impurities"] = [_label_local_class(item) for item in profile.get("impurities", [])]
+            return profile
     return None
 
 
@@ -224,7 +227,7 @@ def build_regulatory_source_map(name: str | None, smiles: str | None = None) -> 
             "name": "FDA ICH M7(R2) Guidance / Q&A",
             "url": "https://www.fda.gov/regulatory-information/search-fda-guidance-documents/questions-and-answers-m7r2-assessment-and-control-dna-reactive-mutagenic-impurities-pharmaceuticals",
             "scope": "FDA-aligned ICH M7 basis for DNA-reactive impurity assessment and complementary QSAR methods.",
-            "use_in_app": "Use as the basis for QSAR classification and alert interpretation.",
+            "use_in_app": "Use to guide qualified ICH M7 evidence review. This app provides limited rule-based screening and does not assign an ICH M7 class.",
         },
         {
             "name": "FDA GSRS / UNII substance search",
@@ -259,7 +262,7 @@ def get_regulatory_profile(name: str | None, smiles: str | None = None) -> dict[
         "profile_type": "source-discovery",
         "smiles": smiles,
         "monograph_ref": "No curated pharmacopeial impurity profile is loaded yet. Use the source map below to check FDA GSRS, USP-NF, public monograph pages, and compound-specific stability literature.",
-        "dmf_summary": "Until compound-specific impurity data are curated, apply FDA ANDA impurity guidance, ICH Q3A/Q3B, and ICH M7(R2) using structure-based QSAR plus targeted source review.",
+        "dmf_summary": "Until compound-specific impurity data are curated, use limited structural alert screening and targeted source review to identify evidence needs for qualified FDA/ICH impurity assessment; no ICH M7 class is assigned by this app.",
         "regulatory_sources": build_regulatory_source_map(name, smiles),
         "impurities": [],
     }
@@ -272,12 +275,20 @@ def get_local_smiles(name: str | None) -> dict[str, str] | None:
     return None
 
 
+def _label_local_class(impurity: dict[str, Any]) -> dict[str, Any]:
+    """Preserve a legacy library class as an unverified assertion, not a result."""
+    item = dict(impurity)
+    item["class_verification_status"] = "unverified"
+    item["class_assignment"] = "Local reference assertion; not assigned by the screen"
+    return item
+
+
 def match_known_impurities(parent_name: str | None = None, smiles: str | None = None) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     info = get_pharmacopeia_info(parent_name)
     if info:
         for impurity in info.get("impurities", []):
-            item = dict(impurity)
+            item = _label_local_class(impurity)
             item["parent"] = parent_name
             matches.append(item)
 
@@ -286,7 +297,7 @@ def match_known_impurities(parent_name: str | None = None, smiles: str | None = 
         for parent, data in PHARMACOPEIA_DB.items():
             for impurity in data.get("impurities", []):
                 if impurity.get("smiles") and impurity["smiles"] == normalized:
-                    item = dict(impurity)
+                    item = _label_local_class(impurity)
                     item["parent"] = parent
                     item["match_type"] = "Exact SMILES"
                     matches.append(item)

@@ -26,7 +26,7 @@ DEGRADATION_RULES = {
         "smarts": "[N+:1](=[O:2])[O-:3]>>[NX3:1]([H])[H]",
         "condition": "Reducing agents or anaerobic conditions",
         "rationale": "Nitro-to-amine reduction can create aromatic amine alerts and should trigger ICH M7 review.",
-        "reg_significance": "Potential Class 2/3 alert formation pathway.",
+        "reg_significance": "Potential structural-alert formation pathway requiring qualified review; no ICH M7 class established.",
         "risk_level": "Critical",
     },
     "Decarboxylation": {
@@ -59,12 +59,28 @@ def known_degradation_products(parent_name: str | None) -> list[dict[str, Any]]:
 def _known_product_result(item: dict[str, Any]) -> dict[str, Any]:
     smiles = item.get("smiles")
     toxicity = assess_mutagenicity(smiles, compound_name=item["name"]) if smiles else {
-        "class": f"ICH M7 Class {item.get('class', 'N/A')}",
+        "class": "Not assigned (expert review required)",
         "status": "review",
+        "screening_method": "Rule-based structural alert screening",
+        "limitations": ["Structure not loaded; screening was not performed and a local library class cannot establish an ICH M7 classification."],
         "alerts": [],
         "evidence_objects": [],
-        "structural_explanation": item.get("issue", "Structure not loaded; QSAR cannot be run."),
+        "structural_explanation": item.get("issue", "Structure not loaded; rule-based screening cannot be run."),
     }
+    local_record = {
+        **item,
+        "verification_status": "unverified",
+        "source_verified": False,
+        "classification_status": "Local library class assertion; not independently verified or assigned by screening.",
+    }
+    if not smiles:
+        risk_basis = "Structure not loaded; structural screening was not performed. Mutagenic risk is undetermined."
+    elif toxicity.get("status") == "error":
+        risk_basis = "Structural screening did not complete. Mutagenic risk is undetermined."
+    elif toxicity.get("expert_alerts"):
+        risk_basis = "Structural rule match requires expert review; mutagenicity and final ICH M7 class remain undetermined."
+    else:
+        risk_basis = "Limited structural screening does not establish mutagenic risk; review supporting source evidence."
     evidence = list(toxicity.get("evidence_objects", []))
     evidence.append(
         make_evidence(
@@ -72,14 +88,14 @@ def _known_product_result(item: dict[str, Any]) -> dict[str, Any]:
             smiles=smiles,
             evidence_type="known degradation product",
             endpoint="impurity identity and origin",
-            result="Known/reference impurity match",
+            result="Local reference-impurity assertion (source unverified)",
             source_tier="compendial",
             source_name=item.get("source_name") or "Compendial impurity library",
             source_url=item.get("source_url"),
-            reasoning=item.get("issue") or "Known impurity/degradation product match found in the curated library.",
-            confidence="High" if item.get("source_url") else "Medium",
+            reasoning=(item.get("issue") or "Impurity/degradation product entry found in the local library.") + " The local source and class assertions have not been independently verified.",
+            confidence="Low",
             regulatory_mapping=["FDA ANDA impurities guidance", "ICH Q3A/Q3B", "ICH M7(R2) if mutagenic alert is present"],
-            details=item,
+            details=local_record,
         )
     )
     return {
@@ -87,7 +103,8 @@ def _known_product_result(item: dict[str, Any]) -> dict[str, Any]:
         "condition": item.get("origin", "Known impurity profile"),
         "rationale": item.get("issue", ""),
         "significance": "Known/reference impurity should be tied to pharmacopeial reference standards, FDA CMC impurity expectations, stability data, and CTD 3.2.P.5.5/3.2.P.8 justification.",
-        "risk": "High" if str(item.get("class")) == "3" else "Review" if str(item.get("class")).lower() == "review" else "Medium",
+        "risk": "Review needed",
+        "risk_basis": risk_basis,
         "name": item["name"],
         "source_url": item.get("source_url"),
         "source_name": item.get("source_name"),
@@ -95,7 +112,9 @@ def _known_product_result(item: dict[str, Any]) -> dict[str, Any]:
         "smiles": smiles or "Structure not loaded",
         "class": toxicity.get("class"),
         "status": toxicity.get("status"),
-        "known_match": item,
+        "screening_method": toxicity.get("screening_method"),
+        "limitations": toxicity.get("limitations", []),
+        "known_match": local_record,
         "evidence_objects": sort_evidence(evidence),
         "structural_explanation": toxicity.get("structural_explanation"),
     }
@@ -161,6 +180,8 @@ def predict_degradation_products(smiles: str, parent_name: str | None = None) ->
                         "smiles": product_smiles,
                         "class": toxicity.get("class"),
                         "status": toxicity.get("status"),
+                        "screening_method": toxicity.get("screening_method"),
+                        "limitations": toxicity.get("limitations", []),
                         "evidence_objects": sort_evidence([pathway_evidence] + toxicity.get("evidence_objects", [])),
                         "structural_explanation": toxicity.get("structural_explanation"),
                     }

@@ -25,11 +25,13 @@ def assess_genotoxicity(smiles, drug_substance_smiles=None, daily_dose_mg=10, co
     """
     Backward-compatible public function used by the Streamlit app.
 
-    The implementation now returns a richer ICH M7 evidence package:
+    The implementation returns limited rule-based screening for evidence review,
+    not a statistical model, mutagenicity probability, or final ICH M7 class:
     - alerts
     - expert_alerts
-    - statistical_alerts
-    - qsar_summary
+    - statistical_alerts (empty compatibility field; no statistical model)
+    - qsar_summary (legacy key with explicit screening limitations)
+    - screening_method and limitations
     - structural_explanation
     - evidence_objects
     - ttc_info

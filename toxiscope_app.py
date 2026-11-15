@@ -121,7 +121,7 @@ st.markdown("""
 
 .badge-class1 { background: #ef4444; color: white; }
 .badge-class3 { background: #f59e0b; color: white; }
-.badge-class5 { background: #10b981; color: white; }
+.badge-review { background: #f59e0b; color: white; }
 
 </style>
 """, unsafe_allow_html=True)
@@ -141,6 +141,21 @@ if "evidence_package" not in st.session_state:
     st.session_state.evidence_package = None
 if "be_profile" not in st.session_state:
     st.session_state.be_profile = DEFAULT_DISSOLUTION_PROFILE.copy()
+
+# An existing browser session may still hold output from the former fixed-score
+# implementation. Require a new screen before showing those derived packages.
+legacy_screening_reset = bool(
+    (st.session_state.results and "screening_method" not in st.session_state.results)
+    or (
+        st.session_state.evidence_package
+        and "screening_method" not in st.session_state.evidence_package.get("assessment", {})
+    )
+)
+if legacy_screening_reset:
+    st.session_state.results = None
+    st.session_state.evidence_package = None
+    st.session_state.degradants = []
+    st.session_state.known_impurities = []
 
 # --- UI Layout ---
 with st.sidebar:
@@ -170,9 +185,9 @@ with st.sidebar:
     reference_product = st.text_input("Reference Product / RLD", value="")
     daily_dose_mg = st.number_input("Daily Dose (mg/day)", min_value=0.001, value=10.0, step=1.0)
     st.markdown("---")
-    st.markdown("### Compliance Rules")
-    st.checkbox("ICH M7(R2) Guidelines", value=True, disabled=True)
-    st.checkbox("ASHBY Structural Alerts", value=True, disabled=True)
+    st.markdown("### Screening scope")
+    st.checkbox("ICH M7(R2) reference context", value=True, disabled=True)
+    st.checkbox("Limited SMARTS structural alert rules", value=True, disabled=True)
     st.checkbox("Proactive Degradation", value=True)
     st.checkbox("Bioequivalence / f2 Strategy", value=True)
 
@@ -384,7 +399,7 @@ def show_molecule(mol, highlight_atoms=None, width=620, height=420):
 
 def collect_alert_atoms(result):
     atoms = set()
-    for alert in result.get("expert_alerts", []) + result.get("statistical_alerts", []):
+    for alert in result.get("expert_alerts", []):
         for match in alert.get("matched_atoms", []) or []:
             atoms.update(match)
     return sorted(atoms)
@@ -392,7 +407,7 @@ def collect_alert_atoms(result):
 def toxic_alerts(result):
     rows = []
     seen = set()
-    for alert in result.get("expert_alerts", []) + result.get("statistical_alerts", []):
+    for alert in result.get("alerts", []) + result.get("expert_alerts", []):
         key = (alert.get("method"), alert.get("alert"), str(alert.get("matched_atoms")))
         if key in seen:
             continue
@@ -403,10 +418,10 @@ def toxic_alerts(result):
 def genotoxic_alert_rows(result):
     rows = []
     for alert in toxic_alerts(result):
-        if alert.get("alert") == "Known Mutagen/Carcinogen":
-            link = "Experimental genotoxicity evidence"
-            functional_group = "Whole molecule / known positive record"
-            alert_type = "Historical positive"
+        if not alert.get("matched_atoms") and alert.get("method") != "Expert Rule-based":
+            link = "Local historical dossier assertion; source verification required"
+            functional_group = "Whole molecule / local dossier record"
+            alert_type = "Unverified local record"
         else:
             link = alert.get("mechanism") or alert.get("reasoning") or "Structural alert linked to DNA-reactive mutagenicity review."
             functional_group = alert.get("alert")
@@ -416,7 +431,7 @@ def genotoxic_alert_rows(result):
                 "Type": alert_type,
                 "Functional group / structural region": functional_group,
                 "Genotoxicity linkage": link,
-                "Matched atoms": alert.get("matched_atoms", "N/A"),
+                "Matched atoms": str(alert.get("matched_atoms") or "N/A"),
                 "Evidence": alert.get("reference") or alert.get("evidence") or "N/A",
             }
         )
@@ -484,7 +499,7 @@ def render_strategy_dashboard():
 
     r1, r2, r3, r4 = st.columns(4)
     r1.markdown(risk_badge_html("Overall Regulatory Risk", snapshot["overall_risk"]), unsafe_allow_html=True)
-    r2.markdown(risk_badge_html("QSAR / Genotoxicity", snapshot["toxicology_risk"]), unsafe_allow_html=True)
+    r2.markdown(risk_badge_html("Structural alert screening", snapshot["toxicology_risk"]), unsafe_allow_html=True)
     r3.markdown(risk_badge_html("Impurity / Degradation", snapshot["degradation_risk"]), unsafe_allow_html=True)
     r4.markdown(risk_badge_html("Bioequivalence", snapshot["bioequivalence_risk"]), unsafe_allow_html=True)
 
@@ -601,6 +616,8 @@ if workspace == "Toxicity Evidence Review":
 st.markdown("<div class='accent-text'>Regulatory Development Strategy Platform</div>", unsafe_allow_html=True)
 st.markdown("<h1 class='hero-title'>ToxiGuard-Platform</h1>", unsafe_allow_html=True)
 st.caption("Ontology + ToxiGuard-AI + ToxiScope + Bioequivalence strategy are connected through one project-level decision workflow.")
+if legacy_screening_reset:
+    st.info("Previous structural assessment output was cleared because the screening method changed. Run the rule-based screen again to create a current package.")
 
 render_strategy_dashboard()
 
@@ -642,19 +659,29 @@ with col1:
 with col2:
     if st.session_state.results:
         res = st.session_state.results
-        status_color = "badge-class1" if "Class 1" in res['class'] or "Class 2" in res['class'] else "badge-class3" if "Class 3" in res['class'] else "badge-class5"
+        status_color = "badge-class1" if res.get("status") == "error" else "badge-review"
         st.markdown(f"""
         <div class='glass-card' style='text-align: center;'>
-            <div class='accent-text'>Assessment Result</div>
-            <h2 style='font-size: 3rem; margin-top: 1rem;'>{res['class']}</h2>
-            <div class='badge {status_color}' style='display: inline-block; margin-top: 1rem;'>{res['status']}</div>
-            <p style='margin-top: 1.5rem; color: #94a3b8;'>Validated through Harness R01-R13 gates</p>
+            <div class='accent-text'>Rule-based screening result</div>
+            <h2 style='font-size: 2rem; margin-top: 1rem;'>{res.get('class', 'Not assigned')}</h2>
+            <div class='badge {status_color}' style='display: inline-block; margin-top: 1rem;'>{res.get('status', 'review')}</div>
+            <p style='margin-top: 1.5rem; color: #94a3b8;'>Expert review required. Package checks do not validate toxicology predictions.</p>
         </div>
         """, unsafe_allow_html=True)
+        if res.get("status") == "error":
+            st.error(res.get("message", "Screening could not be completed."))
+        else:
+            st.warning(res.get("note", "Limited structural alert screening requires expert review."))
+        st.caption(res.get("screening_method", "Rule-based structural alert screening"))
+        limitations = res.get("limitations") or [
+            "Limited SMARTS rules; absence of a match does not establish safety or a negative mutagenicity result.",
+            "No trained statistical model or independent model comparison is implemented.",
+        ]
+        st.caption(" ".join(limitations) if isinstance(limitations, list) else limitations)
 
 render_bioequivalence_module()
 
-if st.session_state.results:
+if st.session_state.results and st.session_state.results.get("status") != "error":
     st.markdown("---")
     structure_smiles = st.session_state.smiles or st.session_state.results.get("canonical_smiles")
     profile = build_structure_profile(structure_smiles)
@@ -674,37 +701,36 @@ if st.session_state.results:
         if alert_list:
             st.dataframe(pd.DataFrame(genotoxic_alert_rows(st.session_state.results)), use_container_width=True, hide_index=True)
             for idx, alert in enumerate(alert_list, 1):
-                severity = "error" if alert.get("method") == "Historical Evidence" else "warning"
                 mechanism = alert.get("mechanism") or alert.get("reasoning")
-                label = "Experimental evidence" if alert.get("alert") == "Known Mutagen/Carcinogen" else "Structural alert"
+                is_local_record = not alert.get("matched_atoms") and alert.get("method") != "Expert Rule-based"
+                label = "Unverified local dossier record" if is_local_record else "Structural alert rule match"
                 message = f"**{idx}. {alert.get('alert')}** ({label})  \n{mechanism}"
-                if severity == "error":
-                    st.error(message)
-                else:
-                    st.warning(message)
+                st.warning(message)
                 with st.expander(f"Details: {alert.get('alert')}"):
                     st.write(f"**Method**: {alert.get('method', 'N/A')}")
-                    st.write("**Interpretation**: This item is treated as genotoxicity-relevant under the current ICH M7/QSAR logic.")
+                    st.write("**Interpretation**: This screening item requires source verification and expert review; it does not establish mutagenicity or an ICH M7 class.")
                     st.write(f"**Matched atoms**: {alert.get('matched_atoms', 'N/A')}")
                     st.write(f"**Reference / Evidence**: {alert.get('reference') or alert.get('evidence') or 'N/A'}")
                     st.write(f"**Reasoning**: {alert.get('reasoning', 'N/A')}")
                     if alert.get("expert_comment"):
                         st.write(f"**Expert comment**: {alert.get('expert_comment')}")
         else:
-            st.success("No genotoxic structural alert was mapped by the current expert/statistical screen.")
-            st.info("Element labels and ion-pair labels describe structure/physicochemical form only. They are not treated as genotoxic alerts unless an ICH M7 structural alert is also mapped.")
+            st.info("No structural alert was mapped by the implemented rules. Mutagenicity remains undetermined; no-alert screening does not establish safety.")
+            st.caption("Element labels and ion-pair labels describe structure/physicochemical form only.")
 
         exp_data = get_experimental_detail(st.session_state.results.get("canonical_smiles") or st.session_state.smiles)
         if exp_data:
-            with st.expander("Experimental Toxicology Evidence"):
+            with st.expander("Local historical toxicology dossier (unverified)"):
+                st.warning("These are assertions stored in the local dossier. The cited studies and assay details have not been independently verified by this app.")
                 st.write(exp_data.get("overall_conclusion", ""))
                 st.dataframe(pd.DataFrame(exp_data.get("assay_data", [])), use_container_width=True, hide_index=True)
 
     ttc = st.session_state.results.get('ttc_info', {})
     q_col1, q_col2, q_col3 = st.columns(3)
-    with q_col1: st.metric("TTC Limit (ug/day)", f"{ttc.get('limit_ug_day')} µg")
-    with q_col2: st.metric("Max Conc. (ppm)", f"{ttc.get('limit_ppm')} ppm")
-    with q_col3: st.metric("Regulatory Class", st.session_state.results['class'])
+    with q_col1: st.metric("TTC reference (ug/day)", f"{ttc.get('limit_ug_day')} µg")
+    with q_col2: st.metric("Reference concentration (ppm)", f"{ttc.get('limit_ppm')} ppm")
+    with q_col3: st.metric("ICH M7 classification", st.session_state.results.get('class', 'Not assigned'))
+    st.caption("These preserved TTC calculations are generic reference values, not a substance-specific acceptable intake or evidence of screening safety. Applicability and any compound-specific limits require expert review.")
 
     tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(["🧫 Structural Elucidation", "⚖️ Evidence Matrix", "🧬 Degradation Profile", "📚 USP/EP/DMF Ref", "📝 Regulatory Draft", "🧾 Harness Report"])
 
@@ -729,7 +755,7 @@ if st.session_state.results:
                 st.caption(f"Heavy atoms: {profile['heavy_atoms']} | Rotatable bonds: {profile['rotatable_bonds']}")
 
             alert_rows = []
-            for alert in st.session_state.results.get("expert_alerts", []) + st.session_state.results.get("statistical_alerts", []):
+            for alert in st.session_state.results.get("expert_alerts", []):
                 alert_rows.append({
                     "Method": alert.get("method"),
                     "Structural alert": alert.get("alert"),
@@ -741,7 +767,7 @@ if st.session_state.results:
                 st.markdown("#### Alert Mapping")
                 st.dataframe(pd.DataFrame(alert_rows), use_container_width=True, hide_index=True)
             else:
-                st.success("No DNA-reactive structural alert was mapped to this structure.")
+                st.info("No alert was mapped by the implemented rules. This does not establish absence of DNA reactivity.")
             st.markdown("#### Regulatory Interpretation")
             st.info(st.session_state.results.get("structural_explanation", "No structural explanation available."))
         else:
@@ -751,9 +777,9 @@ if st.session_state.results:
         st.markdown("<div class='accent-text'>ICH M7 Evidence Object Matrix</div>", unsafe_allow_html=True)
         qsar = st.session_state.results.get("qsar_summary", {})
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Expert QSAR", qsar.get("expert_call", "N/A"))
-        c2.metric("Statistical SAR", qsar.get("statistical_call", "N/A"))
-        c3.metric("Concordance", qsar.get("concordance", "N/A"))
+        c1.metric("Rule-based screen", qsar.get("expert_call", "Not evaluated"))
+        c2.metric("Statistical model", "Not implemented")
+        c3.metric("Independent model comparison", "Not available")
         c4.metric("Evidence Items", len(st.session_state.results.get("evidence_objects", [])))
 
         st.markdown("#### Structural Explanation")
@@ -778,11 +804,11 @@ if st.session_state.results:
         else:
             st.warning("No structured evidence objects were returned.")
 
-        st.markdown("#### QSAR Dual-Method Detail")
+        st.markdown("#### Structural alert screening detail")
         e_col1, e_col2 = st.columns(2)
         with e_col1:
             st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-            st.markdown("##### Method 1: Expert rule-based")
+            st.markdown("##### Implemented SMARTS rules")
             expert_alerts = st.session_state.results.get("expert_alerts", [])
             if expert_alerts:
                 for alert in expert_alerts:
@@ -790,20 +816,14 @@ if st.session_state.results:
                     st.write(alert.get("mechanism", ""))
                     st.caption(f"Matched atoms: {alert.get('matched_atoms', 'N/A')} | Ref: {alert.get('reference', 'N/A')}")
             else:
-                st.success("No expert-rule structural alert identified.")
+                st.info("No alert identified in the implemented rules. This is an undetermined mutagenicity result.")
             st.markdown("</div>", unsafe_allow_html=True)
 
         with e_col2:
             st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-            st.markdown("##### Method 2: Statistical SAR")
-            stat_alerts = st.session_state.results.get("statistical_alerts", [])
-            if stat_alerts:
-                for alert in stat_alerts:
-                    st.error(f"**{alert.get('alert')}**")
-                    st.write(alert.get("reasoning", ""))
-                    st.caption(f"Probability: {int(alert.get('probability', 0) * 100)}% | Matched atoms: {alert.get('matched_atoms', 'N/A')}")
-            else:
-                st.success("No statistical fragment alert identified.")
+            st.markdown("##### Statistical model availability")
+            st.info("No trained statistical model is implemented. No mutagenicity probability, second independent prediction, or model concordance is available.")
+            st.caption("This limited rule-based screen cannot establish an ICH M7 classification on its own.")
             st.markdown("</div>", unsafe_allow_html=True)
 
     with tab2:
@@ -838,13 +858,14 @@ if st.session_state.results:
                     with d_col1:
                         if d_profile:
                             show_molecule(d_profile["mol"], d_alert_atoms, width=440, height=300)
-                            st.caption("Degradation/impurity structure with QSAR alert atoms highlighted when available.")
+                            st.caption("Degradation/impurity structure with matched structural alert atoms highlighted when available.")
                         else:
                             st.info("No drawable structure is loaded for this degradation product.")
                         st.write(f"**SMILES**: `{d.get('smiles')}`")
                         st.write(f"**ICH M7 Result**: {d.get('class')} ({d.get('status')})")
                         st.write(f"**Condition / Origin**: {d.get('condition')}")
-                        st.write(f"**Risk Level**: {d.get('risk')}")
+                        st.write(f"**Review priority**: {d.get('risk')}")
+                        st.caption(d.get("risk_basis") or "Qualitative degradation-pathway priority; it does not establish mutagenicity or an ICH M7 class.")
                     with d_col2:
                         if d.get("source_name"):
                             st.write(f"**Evidence Source**: {d.get('source_name')}")
@@ -854,7 +875,7 @@ if st.session_state.results:
                         st.write(f"**Regulatory Significance**: {d.get('significance', 'N/A')}")
                         if d.get("source_url"):
                             st.markdown(f"[Source reference]({d['source_url']})")
-                    st.markdown("**Structural/QSAR Interpretation**")
+                    st.markdown("**Rule-based screening interpretation**")
                     st.info(d.get("structural_explanation") or "No structural explanation available.")
                     d_alert_rows = evidence_alert_rows(d_evidence)
                     if d_alert_rows:
@@ -893,6 +914,7 @@ if st.session_state.results:
 
         matches = st.session_state.known_impurities or match_known_impurities(input_name, st.session_state.smiles)
         if matches:
+            st.caption("Class values below are local reference assertions requiring source verification and expert review; they are not classifications established by this screening run.")
             match_rows = []
             for match in matches:
                 match_rows.append({
@@ -901,7 +923,7 @@ if st.session_state.results:
                     "Name": match.get("name"),
                     "Origin": match.get("origin"),
                     "Alert": match.get("alert"),
-                    "Provisional Class": f"Class {match.get('class')}",
+                    "Local class assertion (unverified)": f"Class {match.get('class')}",
                     "CAS": match.get("cas") or "",
                     "Source": match.get("source_name"),
                     "URL": match.get("source_url") or "",
@@ -913,7 +935,7 @@ if st.session_state.results:
 
     with tab4:
         st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-        st.markdown("#### Submission-Ready Regulatory Narrative")
+        st.markdown("#### Regulatory draft for expert review")
         narrative = generate_regulatory_narrative(st.session_state.results, input_name or "the submitted compound")
         st.text_area("Narrative Preview", value=narrative, height=360)
         st.button("📥 Download PDF Report")
@@ -929,12 +951,13 @@ if st.session_state.results:
         h_col1, h_col2, h_col3, h_col4 = st.columns(4)
         h_col1.metric("Harness", manifest.get("status", "N/A"))
         h_col2.metric("Policy", manifest.get("policy", "N/A"))
-        h_col3.metric("Passed", validation.get("passed", 0))
-        h_col4.metric("Review", validation.get("review", 0))
+        h_col3.metric("Package checks passed", validation.get("passed", 0))
+        h_col4.metric("Checks needing review", validation.get("review", 0))
+        st.caption("These checks inspect package completeness and traceability. They do not establish model validity, toxicological safety, or regulatory acceptance.")
 
         gates = validation.get("gates") or package.get("validation_gates") or st.session_state.results.get("validation_gates", [])
         if gates:
-            st.markdown("#### Validation Gates")
+            st.markdown("#### Package checks")
             st.dataframe(pd.DataFrame(gates), use_container_width=True, hide_index=True)
 
         if report:
