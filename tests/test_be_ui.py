@@ -19,6 +19,8 @@ def _start(profile=None):
         app.session_state["be_profile"] = profile
     app.run(timeout=30)
     assert not app.exception
+    app.segmented_control(key="analysis_view").set_value("용출 비교").run(timeout=30)
+    assert not app.exception
     return app
 
 
@@ -46,9 +48,11 @@ def _assert_cleared(app):
     assert not app.exception
     assert app.session_state["be_result"] is None
     assert app.session_state["be_export"] is None
-    assert not any(metric.label == "Descriptive f2" for metric in app.metric)
+    assert not any(metric.label == "f2 · 기술 통계" for metric in app.metric)
     assert not any(item.proto.label == "Download dissolution calculation + provenance"
                    for item in app.get("download_button"))
+    charts = [*app.get("vega_lite_chart"), *app.get("arrow_vega_lite_chart")]
+    assert not any(item.proto.alt.startswith("현재 입력의 정규모형") for item in charts)
 
 
 def test_simulation_labels_and_export_preserve_inputs_without_claiming_bioequivalence():
@@ -61,13 +65,13 @@ def test_simulation_labels_and_export_preserve_inputs_without_claiming_bioequiva
     assert result.clinical_be_established is False
     assert result.regulatory_acceptance == "Not established"
     labels = {metric.label for metric in app.metric}
-    assert {"Descriptive f2", "Simulated f2, 2.5–97.5 percentiles", "Simulated fraction with f2 ≥ 50"} <= labels
+    assert {"f2 · 기술 통계", "모형 시뮬레이션 2.5–97.5%", "조건부 시뮬레이션 빈도 · f2 ≥ 50"} <= labels
     assert not any("bootstrap" in label.lower() or "confidence" in label.lower() or "probability" in label.lower()
                    for label in labels)
     text = _text(app)
-    assert "illustrative synthetic example" in text
-    assert "independent-normal parametric simulation" in text
-    assert "not a confidence interval or a probability of bioequivalence" in text
+    assert "설명용 합성 예시" in text
+    assert "독립 정규모형 시뮬레이션" in text
+    assert "신뢰구간 또는 생물학적 동등성 확률이 아닙니다" in text
     assert "FDA strategy decision" not in text
     assert "FDA submission risk" not in text
     assert not app.success
@@ -138,8 +142,10 @@ def test_invalid_profiles_display_validation_errors_before_charting(invalid_kind
     app = _start(profile)
     assert any("Profile validation failed" in item.value for item in app.error)
     assert next(button for button in app.button if button.label == "Calculate f2 and simulation").disabled
-    assert not app.get("arrow_vega_lite_chart")
-    assert not any(metric.label == "Descriptive f2" for metric in app.metric)
+    charts = [*app.get("vega_lite_chart"), *app.get("arrow_vega_lite_chart")]
+    assert not any(item.proto.alt.startswith(("입력된 기준품과 시험품", "입력된 각 측정 시점", "현재 입력의 정규모형"))
+                   for item in charts)
+    assert not any(metric.label == "f2 · 기술 통계" for metric in app.metric)
 
 
 def test_explicit_r_failure_is_visible_and_does_not_produce_a_python_result():
@@ -161,7 +167,9 @@ def test_legacy_cached_be_output_is_cleared_without_clearing_ntr_evidence():
     app.run(timeout=30)
     _assert_cleared(app)
     assert app.session_state["ntr_docs"] == ["Preserved NTR source state"]
-    assert any("Previous dissolution output was cleared" in item.value for item in app.info)
+    app.segmented_control(key="analysis_view").set_value("용출 비교").run(timeout=30)
+    _assert_cleared(app)
+    assert any("이전 용출 결과를 지웠습니다" in item.value for item in app.info)
 
 
 def test_threshold_message_uses_unrounded_f2_at_the_boundary():
@@ -171,7 +179,7 @@ def test_threshold_message_uses_unrounded_f2_at_the_boundary():
     app = _calculate(_start(profile))
     assert app.session_state["be_result"].f2 == 50.0
     assert app.session_state["be_result"].descriptive_threshold_met is False
-    assert any("Descriptive threshold comparison: f2 < 50" in item.value for item in app.info)
+    assert any("기술적 기준: f2 < 50" in item.value for item in app.caption)
 
 
 def test_duplicate_column_profile_is_rejected_before_the_editor_can_crash():
@@ -179,5 +187,5 @@ def test_duplicate_column_profile_is_rejected_before_the_editor_can_crash():
     profile.columns = ["Time (min)", "Reference Mean (%)", "Reference SD", "Reference n",
                        "Test Mean (%)", "Test SD", "Test SD"]
     app = _start(profile)
-    assert any("duplicate column names" in item.value for item in app.error)
-    assert not any(metric.label == "Descriptive f2" for metric in app.metric)
+    assert any("seven unique dissolution columns" in item.value for item in app.error)
+    assert not any(metric.label == "f2 · 기술 통계" for metric in app.metric)

@@ -1,6 +1,7 @@
 """Local, source-linked NTR review; legacy assessment stays optional and separate."""
 import hashlib
 import json
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -13,6 +14,7 @@ from nora.assertions import (
     REVIEW_STATUS_OPTIONS,
 )
 from nora.evidence_review import build_project_review
+from presentation.ntr_visuals import render_ntr_charts
 from ntr_bridge import (
     empty_input,
     context_key,
@@ -117,58 +119,72 @@ def _table_rows(rows):
     ]
 
 
-def _render_project_review(report, project_id, name, manual_input):
-    st.subheader("Project evidence gaps and possible conflicts")
+def _render_project_review(report, project_id, name, manual_input, assertions, docs, package, key_prefix):
     context = manual_input.get("context_of_use", {}) if isinstance(manual_input, dict) else {}
     endpoint = context.get("target_endpoint") if isinstance(context, dict) else None
-    st.caption(f"Project: {project_id or 'Not specified'} · Compound: {name or 'Not specified'} · "
-               f"Requested endpoint: {endpoint or 'Not specified'}")
-    st.caption("The endpoint is the requested review scope, not an observed toxicity finding. "
-               "Manual input values and template fields do not count as source-linked observations.")
+    endpoint = endpoint if isinstance(endpoint, str) and endpoint.strip() else "미지정"
+    st.caption(f"{project_id or '프로젝트 미지정'} / {name or '물질 미지정'} · 요청 범위: {endpoint}")
     summary = report.get("summary", {})
-    cols = st.columns(4)
-    for col, label, field in zip(cols,
-        ("Possible conflicts", "Scope differences", "Coverage gaps", "Source issues"),
-        ("possible_conflicts", "scope_differences", "coverage_gaps", "source_issues")):
-        col.metric(label, summary.get(field, 0))
-    st.warning(report.get("decision", "Expert review required"))
+    with st.container(horizontal=True, wrap=True, gap="small"):
+        st.metric("자료", len(docs), width=155, border=True,
+                  help="업로드 문서 수. 독립 연구 수가 아닙니다.")
+        st.metric("주장", len(assertions), width=155, border=True,
+                  help="제안·승인·수정·거절 상태를 모두 포함합니다.")
+        st.metric("검토된 주장", sum(a.review_status in {"승인", "수정"} for a in assertions),
+                  width=155, border=True, help="사용자가 승인·수정한 주장 수. 과학적 검증을 뜻하지 않습니다.")
+        st.metric("값 차이 후보", summary.get("possible_conflicts", 0), width=155, border=True,
+                  help="동일 필드에서 비교 대상으로 남은 서로 다른 단일 값의 후보 수. 전체 검토 항목 수나 확정된 과학적 충돌 수가 아닙니다.")
+        st.metric("미확인 필드", summary.get("coverage_gaps", 0), width=155, border=True,
+                  help="현재 추출·검토 자료의 연결이 확인되지 않은 필드 수.")
+    render_ntr_charts(report, assertions, docs, key_prefix=key_prefix)
+
     findings = report.get("findings", [])
     if findings:
-        st.dataframe(pd.DataFrame(_table_rows([
-            {key: finding.get(key, "") for key in
-             ("kind", "field_path", "title", "detail", "uncertainty", "review_state")}
-            for finding in findings
-        ])), hide_index=True, width="stretch", alt="Source-linked evidence gaps and possible conflicts requiring expert review")
-        for finding in findings:
-            with st.expander(f"{finding.get('kind', 'Review finding')} · {finding.get('title', finding.get('field_path', 'Source-linked finding'))}"):
-                st.write(finding.get("detail", ""))
-                st.caption(finding.get("uncertainty", "Expert review required."))
-                st.json({"finding_id": finding.get("finding_id"), "scope": finding.get("scope", {}),
-                         "provenance": finding.get("provenance", []),
-                         "review_state": finding.get("review_state", "needs_expert_review")}, expanded=False)
-    else:
-        st.info("No possible conflict was detected in the current extracted assertions. "
-                "This does not establish consistency, evidence completeness, or safety.")
-    with st.expander("Coverage and source locations", expanded=True):
-        coverage = report.get("coverage", [])
-        if coverage:
-            st.dataframe(pd.DataFrame(_table_rows(coverage)), hide_index=True, width="stretch",
-                         alt="Intake field coverage with assertion identifiers and source locations")
-        else:
-            st.info("No coverage rows are available. Missing extraction is not a negative finding.")
-    with st.expander("Review scope and limitations"):
+        finding_map = {finding["finding_id"]: finding for finding in findings}
+        revision = hashlib.sha256(json.dumps(list(finding_map), sort_keys=True).encode()).hexdigest()[:12]
+        kind_labels = {"possible_conflict": "값 차이 후보", "source_issue": "출처 확인",
+            "scope_review": "범위 확인", "scope_difference": "범위 차이",
+            "project_scope_mismatch": "프로젝트 범위", "coverage_gap": "필드 근거",
+            "extraction_limit": "추출 한계", "out_of_scope": "지원 범위 밖",
+            "input_issue": "입력 확인", "possible_value_difference": "목록 차이"}
+        selected = st.selectbox("상세 검토 항목", list(finding_map),
+            format_func=lambda item: f"{kind_labels.get(finding_map[item].get('kind'), '검토 항목')} · {finding_map[item].get('field_path') or '문서'}",
+            key="ntr_finding:" + key_prefix + ":" + revision)
+        finding = finding_map[selected]
+        with st.expander("선택 항목 · 근거와 범위", expanded=False):
+            st.write(finding.get("detail", ""))
+            st.caption(finding.get("uncertainty", "Expert review required."))
+            st.json({"finding_id": finding.get("finding_id"), "scope": finding.get("scope", {}),
+                     "provenance": finding.get("provenance", []),
+                     "review_state": finding.get("review_state", "needs_expert_review")}, expanded=False)
+    with st.expander("근거·방법·한계", expanded=False):
+        st.caption("전문가 검토 필요 · 자동 추출의 빈칸은 음성 결과가 아닙니다.")
+        st.caption("The endpoint is the requested review scope, not an observed toxicity finding. "
+                   "Manual input values and template fields do not count as source-linked observations.")
+        st.caption("Research prototype: deterministic evidence review, not toxicity prediction or regulatory acceptance. "
+                   "Observation, prediction, reference context and unreviewed assertions remain distinct. "
+                   "Empty or failed extraction does not establish absence of toxicity or evidence.")
         st.json(report.get("scope", {}), expanded=False)
+        if report.get("coverage"):
+            st.dataframe(pd.DataFrame(_table_rows(report["coverage"])), hide_index=True, width="stretch",
+                         alt="Intake field coverage with assertion identifiers and source locations")
+        if findings:
+            st.dataframe(pd.DataFrame(_table_rows([
+                {key: finding.get(key, "") for key in
+                 ("kind", "field_path", "title", "detail", "uncertainty", "review_state")}
+                for finding in findings
+            ])), hide_index=True, width="stretch", alt="All source-linked findings requiring expert review")
         for limitation in report.get("limitations", []):
             st.caption(limitation)
+        st.caption("ToxiScope results stay separate from customer observations. They do not populate NAM/AI outcomes.")
+        st.json(context_snapshot(project_id, name, package), expanded=False)
+        st.json(report, expanded=False)
 
 
 def render_ntr_panel(project_id, name, package):
-    st.subheader("Toxicity Evidence Review")
-    st.caption("Project → sources → human review → gaps and possible conflicts. "
-               "Local processing on this app server; no external AI calls.")
-    st.warning("Research prototype: deterministic evidence review, not toxicity prediction or regulatory acceptance. "
-               "Observation, prediction, reference context and unreviewed assertions remain distinct. "
-               "Empty or failed extraction does not establish absence of toxicity or evidence.")
+    st.subheader("NTR · 프로젝트 근거 검토")
+    st.caption("검토 지원 · 독성/규제 판정 아님")
+    download_slot = st.empty()
     key = _activate_workspace(project_id, name, package)
     st.session_state.ntr_context_key = context_key(project_id, name, package)
     quarantine = st.session_state.get("ntr_unbound_legacy_workspace")
@@ -180,27 +196,12 @@ def render_ntr_panel(project_id, name, package):
             st.download_button("Download unbound legacy evidence + provenance",
                 json.dumps(quarantine, ensure_ascii=False, indent=2, default=str),
                 "toxiscope-ntr-unbound-legacy.json", "application/json", key="ntr_unbound_download")
-    if st.button("Clear NTR workspace", key="ntr_clear"):
-        st.session_state.ntr_docs = []
-        st.session_state.ntr_assertions = []
-        st.session_state.ntr_generation += 1
-        st.session_state.ntr_manual_raw = None
-        st.session_state.ntr_evaluation_state = None
-        _save_workspace(key)
-        st.rerun()
+    overview_slot = st.container()
     prefix = key + ":" + str(st.session_state.ntr_generation)
     docs = st.session_state.ntr_docs
     assertions = st.session_state.ntr_assertions
-    cols = st.columns(3)
-    cols[0].metric("Sources", len(docs))
-    cols[1].metric("Assertions", len(assertions))
-    cols[2].metric("Reviewed", sum(a.review_status in {"승인", "수정"} for a in assertions))
-    with st.expander("Project context & structural evidence", expanded=False):
-        st.caption("ToxiScope results stay separate from customer observations. They do not populate NAM/AI outcomes.")
-        st.json(context_snapshot(project_id, name, package), expanded=False)
-    with st.expander("1 · Source documents", expanded=not docs):
-        st.caption("Upload only documents permitted on this server. Raw text stays in this session; download before closing. "
-                   "No OCR. Failed extraction does not mean evidence is absent. Classify each source explicitly.")
+    with st.expander("자료 추가·출처 분류", expanded=False):
+        st.caption("허용된 자료만 업로드하세요. 서버 내 처리 · 세션 내 보관 · 닫기 전 다운로드 · OCR 없음 · 추출 실패는 근거 부재가 아닙니다.")
         source_options = ["unclassified", "customer_evidence", "external_reference"]
         source_kind = st.selectbox("Source type", source_options, key="ntr_source:" + prefix)
         uploads = st.file_uploader("PDF, DOCX, CSV, XLSX, JSON or TXT", accept_multiple_files=True,
@@ -227,7 +228,15 @@ def render_ntr_panel(project_id, name, package):
                 st.warning(warning)
             with st.expander(document.name + " · provenance"):
                 st.json(document.to_dict(), expanded=False)
-    with st.expander("2 · Review proposed assertions", expanded=bool(assertions)):
+        if st.button("Clear NTR workspace", key="ntr_clear"):
+            st.session_state.ntr_docs = []
+            st.session_state.ntr_assertions = []
+            st.session_state.ntr_generation += 1
+            st.session_state.ntr_manual_raw = None
+            st.session_state.ntr_evaluation_state = None
+            _save_workspace(key)
+            st.rerun()
+    with st.expander("주장 검토 · 값/유형/범위", expanded=False):
         st.caption("Regex extraction proposes claims only. Approve/edit after reading the cited excerpt. "
                    "Choose evidence kind and scope explicitly; no claim is automatically an observation. "
                    "Changing a value, evidence kind or scope requires renewed approval. "
@@ -256,7 +265,7 @@ def render_ntr_panel(project_id, name, package):
             st.session_state.ntr_assertions = assertions
         else:
             st.info("No proposed assertions. You may enter reviewed data below; absent extraction is not a negative finding.")
-    with st.expander("3 · Advanced assessment inputs", expanded=False):
+    with st.expander("고급 입력 · 요청 범위와 수동 JSON", expanded=False):
         st.caption("Manual entries are user-supplied, not independently verified. Default AI/NAM streams are disabled. "
                    "Review every enabled field, source and use context; do not treat template values as observations.")
         initial_raw = st.session_state.get("ntr_manual_raw")
@@ -282,15 +291,16 @@ def render_ntr_panel(project_id, name, package):
     report = build_project_review(assertions, docs, project_id=project_id, compound_name=name,
                                   assessment_input=manual_input)
     st.session_state.ntr_project_review = report
-    _render_project_review(report, project_id, name, manual_input)
+    with overview_slot:
+        _render_project_review(report, project_id, name, manual_input, assertions, docs, package, prefix)
     structural_context = context_snapshot(project_id, name, package)
     fingerprint = _fingerprint(raw, assertions, docs, structural_context)
-    cached = st.session_state.get("ntr_evaluation_state")
+    cached: dict[str, Any] | None = st.session_state.get("ntr_evaluation_state")
     if cached and cached.get("fingerprint") != fingerprint:
         st.session_state.ntr_evaluation_state = None
         cached = None
         st.info("Previous legacy assessment output was cleared because the inputs, evidence review, sources or structural context changed.")
-    with st.expander("Optional legacy evidence-role assessment (uncalibrated)"):
+    with st.expander("시나리오 · 기존 규칙 평가 (미보정)", expanded=False):
         st.caption("The original fixed-rule assessment is optional and supports early hepatotoxicity only; "
                    "other endpoints remain unevaluable (R0). R0–R5 are uncalibrated evidence-role labels, not safety scores. "
                    "Its fields labelled observations and interpretations are rule-engine output, not independently observed facts.")
@@ -309,20 +319,21 @@ def render_ntr_panel(project_id, name, package):
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
                 cached["evaluation_error"] = str(exc)
             st.session_state.ntr_evaluation_state = cached
-        if cached and cached.get("evaluation_error"):
-            st.error("Evaluation blocked: " + cached["evaluation_error"])
-        if cached and cached.get("result"):
-            result = cached["result"]
+        evaluation_error = cached.get("evaluation_error") if cached else None
+        if evaluation_error:
+            st.error(f"Evaluation blocked: {evaluation_error}")
+        legacy_result = cached.get("result") if cached else None
+        if legacy_result:
             a, b, c = st.columns(3)
-            a.metric("Legacy evidence role (uncalibrated)", result.get("evidence_role_code", "Not evaluated"))
-            b.metric("Legacy data-gap prompts", len(result.get("data_gaps", [])))
-            c.metric("Legacy enabled evidence flags", result.get("evidence_stream_count", 0))
+            a.metric("Legacy evidence role (uncalibrated)", legacy_result.get("evidence_role_code", "Not evaluated"))
+            b.metric("Legacy data-gap prompts", len(legacy_result.get("data_gaps", [])))
+            c.metric("Legacy enabled evidence flags", legacy_result.get("evidence_stream_count", 0))
             st.warning("This optional legacy result is uncalibrated rule-engine output. It does not establish observed toxicity, safety, or regulatory acceptance.")
-            if result.get("data_gaps"):
-                st.dataframe(pd.DataFrame(_table_rows(result["data_gaps"])), hide_index=True, width="stretch",
+            if legacy_result.get("data_gaps"):
+                st.dataframe(pd.DataFrame(_table_rows(legacy_result["data_gaps"])), hide_index=True, width="stretch",
                              alt="Optional legacy rule-engine data-gap prompts")
             with st.expander("Legacy rules, uncertainty & full result"):
-                st.json(result, expanded=False)
+                st.json(legacy_result, expanded=False)
     export = build_review_export(report, docs, assertions, project_id=project_id, compound_name=name,
         package=package, manual_input=manual_input,
         reviewed_input=cached.get("reviewed_input") if cached else None,
@@ -331,6 +342,7 @@ def render_ntr_panel(project_id, name, package):
         raw_manual_input=raw)
     export["review_fingerprint"] = fingerprint
     st.session_state.ntr_review_export = export
-    st.download_button("Download review + provenance", json.dumps(export, ensure_ascii=False, indent=2, default=str),
-                       "toxiscope-ntr-review.json", "application/json", key="ntr_download:" + prefix)
+    with download_slot:
+        st.download_button("Download review + provenance", json.dumps(export, ensure_ascii=False, indent=2, default=str),
+                           "toxiscope-ntr-review.json", "application/json", key="ntr_download:" + prefix, width="content")
     _save_workspace(key)

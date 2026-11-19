@@ -14,6 +14,8 @@ def test_ntr_navigation_evaluate_reset_and_return():
     next(b for b in app.button if b.label == 'Clear NTR workspace').click().run()
     assert not app.exception
     app.radio(key='workspace').set_value('Strategy Dashboard').run()
+    assert app.segmented_control(key='analysis_view').value == '구조 신호'
+    app.segmented_control(key='analysis_view').set_value('용출 비교').run()
     assert any(b.label == 'Calculate f2 and simulation' for b in app.button)
     app.radio(key='workspace').set_value('Toxicity Evidence Review').run()
     assert not app.exception
@@ -34,9 +36,10 @@ def test_existing_qsar_be_and_mismatched_context():
     app = AppTest.from_file(APP).run(timeout=30)
     next(t for t in app.text_input if t.label == 'Compound Name').set_value('Synthetic public aspirin')
     app.text_area(key='smiles').set_value('CC(=O)OC1=CC=CC=C1C(=O)O')
-    next(b for b in app.button if b.label == '🚀 Run Regulatory Assessment').click().run()
+    next(b for b in app.button if b.label == '구조 신호 분석').click().run()
     assert not app.exception
     assert app.session_state['evidence_package']['assessment']
+    app.segmented_control(key='analysis_view').set_value('용출 비교').run()
     next(b for b in app.button if b.label == 'Calculate f2 and simulation').click().run()
     assert not app.exception
     assert app.session_state['be_result'].f2 > 50

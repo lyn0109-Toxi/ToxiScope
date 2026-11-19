@@ -62,7 +62,7 @@ def test_possible_conflicts_visible_and_exportable_even_when_legacy_evaluation_b
     app = _seed(_start(), [_evidence("positive", number=1), _evidence("negative", number=2)])
     report = app.session_state["ntr_project_review"]
     assert report["summary"]["possible_conflicts"] >= 1
-    assert any(metric.label == "Possible conflicts" and int(metric.value) >= 1 for metric in app.metric)
+    assert any(metric.label == "값 차이 후보" and int(metric.value) >= 1 for metric in app.metric)
     assert app.get("download_button")
     before = app.session_state["ntr_review_export"]
     assert before["result"] is None
@@ -158,6 +158,7 @@ def test_structural_package_change_preserves_evidence_and_clears_legacy_result()
     document_id = app.session_state["ntr_docs"][0].document_id
     app.session_state["evidence_package"] = {
         "assessment": {"screening_method": "Rule-based structural alert screening"},
+        "worker_report": {"harness": {"project_id": "TXS-2026-001"}},
         "generated_at": "synthetic changed SAR timestamp",
     }
     app.run(timeout=30)

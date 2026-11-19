@@ -25,6 +25,21 @@ Use these settings when creating the app on Streamlit Community Cloud:
 The cloud entry point imports `toxiscope_app.py`, so the local app and deployed
 app use the same ToxiScope runtime.
 
+## Visual evidence workbench
+
+The interface follows problem definition → data quality → comparison → scenario
+→ review. **구조 신호** shows the assessed molecule and actual SMARTS match counts;
+**용출 비교** separates entered mean/SD curves and percentage-point differences
+from computed normal-model simulation percentiles. **프로젝트 요약** combines
+only results linked to the active project and compound. In **근거 검토**, NTR
+charts count recorded coverage states, review items, assertion kinds, and source
+classifications. Counts are not risk, severity, scientific validity, or source
+independence scores. Long source records, methods, limitations, and exports
+remain available in expandable details. The five-step strip describes the
+analysis flow, not completed or validated stages.
+Molecular views use RDKit's standard SVG depiction with the canonical atom order
+used by screening highlights. Rendering failures are reported explicitly.
+
 ## Local Run
 
 ```bash
@@ -108,7 +123,7 @@ the individual-observation/Expected-f2 bootstrap discussed in the
 
 ## NTR evidence workspace
 
-Select **Toxicity Evidence Review** in the sidebar. Upload permitted documents,
+Select **근거 검토** (Toxicity Evidence Review) in the sidebar. Upload permitted documents,
 classify their source, and review the proposed assertions. The project review
 report lists possible disagreements, differences in study scope, source issues,
 and gaps in source-linked intake coverage for expert review. It does not decide
